@@ -13,7 +13,9 @@
 
 typedef struct {
     ngx_str_t                 app_href;
+    ngx_str_t                 app_uri;
     ngx_str_t                 apikey;
+    ngx_http_upstream_conf_t  upstream;
 } ngx_http_auth_stormpath_conf_t;
 
 
@@ -25,30 +27,13 @@ typedef struct {
 
 static struct {
     ngx_str_t http_method_post;
-    ngx_str_t content_type;
-    ngx_str_t application_json;
-    ngx_str_t accept;
-    ngx_str_t user_agent;
-    ngx_str_t user_agent_value;
-    ngx_str_t content_length;
-    ngx_str_t host;
     ngx_str_t api_stormpath_com;
     ngx_str_t realm_stormpath;
-    ngx_str_t authorization;
 } strings = {
     { 4, (u_char *) "POST " }, // nginx deliberately offs-by-one here
-    ngx_string("Content-Type"),
-    ngx_string("application/json"),
-    ngx_string("Accept"),
-    ngx_string("User-Agent"),
-    ngx_string("stormpath-nginx/alpha (" NGINX_VER ")"),
-    ngx_string("Content-Length"),
-    ngx_string("Host"),
     ngx_string("api.stormpath.com"),
     ngx_string("Protected by Stormpath"),
-    ngx_string("Authorization")
 };
-
 
 static ngx_int_t ngx_http_auth_stormpath_handler(ngx_http_request_t *r);
 static ngx_int_t ngx_http_auth_stormpath_done(ngx_http_request_t *r,
@@ -112,60 +97,6 @@ ngx_module_t  ngx_http_auth_stormpath_module = {
     NGX_MODULE_V1_PADDING
 };
 
-
-static ngx_table_elt_t *
-ngx_http_auth_stormpath_add_header(ngx_http_request_t *r,
-    ngx_str_t key, ngx_str_t value)
-{
-    ngx_table_elt_t *h;
-    u_char *p;
-
-    h = ngx_list_push(&r->headers_in.headers);
-    if (h == NULL) {
-        return NULL;
-    }
-
-    h->key = key;
-    h->lowcase_key = ngx_pnalloc(r->pool, h->key.len);
-    if (h->lowcase_key == NULL) {
-        return NULL;
-    }
-
-    ngx_strlow(h->lowcase_key, h->key.data, h->key.len);
-
-    p = ngx_pnalloc(r->pool, value.len);
-    if (p == NULL) {
-        return NULL;
-    }
-
-    ngx_memcpy(p, value.data, value.len);
-
-    h->value.data = p;
-    h->value.len = value.len;
-
-    return h;
-}
-
-static ngx_table_elt_t *
-ngx_http_auth_stormpath_add_content_length_header(ngx_http_request_t *r,
-    u_char *data)
-{
-    u_char *p;
-    ngx_str_t val;
-
-    p = ngx_palloc(r->pool, NGX_OFF_T_LEN);
-    if (p == NULL) {
-        return NULL;
-    }
-
-    ngx_sprintf(p, "%z", ngx_strlen(data));
-
-    val.data = p;
-    val.len = ngx_strlen(p);
-
-    return ngx_http_auth_stormpath_add_header(r, strings.content_length, val);
-}
-
 /* this is directly copied from ngx_http_auth_stormpath_set_realm, too
  * bad it isn't originally exposed */
 static ngx_int_t
@@ -223,18 +154,138 @@ ngx_http_auth_stormpath_encode_user_pass(ngx_http_request_t *r,
     return enc;
 }
 
+static ngx_int_t
+ngx_http_auth_stormpath_create_request(ngx_http_request_t *r)
+{
+    ngx_buf_t *b;
+    ngx_chain_t *cl;
+    ngx_http_auth_stormpath_conf_t *cf;
+
+    cf = ngx_http_get_module_loc_conf(r->parent, ngx_http_auth_stormpath_module);
+
+    b = ngx_create_temp_buf(r->pool, 65536);
+    if (b == NULL)
+        return NGX_ERROR;
+
+    cl = ngx_alloc_chain_link(r->pool);
+    if (cl == NULL)
+        return NGX_ERROR;
+
+    cl->buf = b;
+    r->upstream->request_bufs = cl;
+
+    ngx_snprintf(b->pos, 65535,
+        "POST %V/loginAttempts HTTP/1.1\r\n"
+        "Host: api.stormpath.com\r\n"
+        "Content-Type: application/json\r\n"
+        "Accept: application/json\r\n"
+        "Content-Length: %d\r\n"
+        "Authorization: Basic %V\r\n"
+        "Connection: close\r\n"
+        "User-Agent: stormpath-nginx/alpha (" NGINX_VER ")\r\n\r\n",
+            &r->uri,
+            r->headers_in.content_length_n,
+            &cf->apikey);
+
+    b->last = b->pos + ngx_strlen(b->pos);
+    cl->next = r->request_body->bufs;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_http_auth_stormpath_process_header(ngx_http_request_t *r)
+{
+    ngx_int_t rc;
+
+    for ( ;; ) {
+        rc = ngx_http_parse_header_line(r, &r->upstream->buffer, 1);
+
+        if (rc == NGX_OK) {
+            continue;
+        }
+
+        if (rc == NGX_HTTP_PARSE_HEADER_DONE) {
+            return NGX_OK;
+        }
+
+        if (rc == NGX_AGAIN) {
+            return NGX_AGAIN;
+        }
+
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "upstream sent invalid header");
+
+        return NGX_HTTP_UPSTREAM_INVALID_HEADER;
+    }
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_http_auth_stormpath_process_status_line(ngx_http_request_t *r)
+{
+    ngx_int_t rc;
+    ngx_http_status_t status;
+
+    ngx_memzero(&status, sizeof(ngx_http_status_t));
+
+    rc = ngx_http_parse_status_line(r, &r->upstream->buffer, &status);
+    if (rc == NGX_AGAIN) {
+        return rc;
+    }
+
+    if (rc == NGX_OK) {
+        r->upstream->headers_in.status_n = status.code;
+        r->upstream->process_header = ngx_http_auth_stormpath_process_header;
+        return ngx_http_auth_stormpath_process_header(r);
+    }
+
+    return NGX_HTTP_UPSTREAM_INVALID_HEADER;
+}
+
+static ngx_int_t
+ngx_http_auth_stormpath_reinit_request(ngx_http_request_t *r)
+{
+    r->upstream->process_header = ngx_http_auth_stormpath_process_status_line;
+    return NGX_OK;
+}
+
+void
+ngx_http_auth_stormpath_abort_request(ngx_http_request_t *r)
+{
+}
+
+void
+ngx_http_auth_stormpath_finalize_request(ngx_http_request_t *r,
+    ngx_int_t rc)
+{
+}
+
+static ngx_int_t
+ngx_http_auth_stormpath_filter_init(void *data)
+{
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_http_auth_stormpath_input_filter(void *data, ssize_t bytes)
+{
+    return NGX_OK;
+}
+
 
 static ngx_int_t
 ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
 {
-    ngx_table_elt_t                *h;
     ngx_http_request_t             *sr;
     ngx_http_post_subrequest_t     *ps;
     ngx_http_auth_stormpath_ctx_t  *ctx;
     ngx_http_auth_stormpath_conf_t *cf;
     ngx_buf_t                      *b;
     u_char                         *auth_data;
-    ngx_str_t encoded_userpwd;
+    ngx_str_t                       encoded_userpwd;
+    ngx_http_upstream_t            *u;
 
     cf = ngx_http_get_module_loc_conf(r, ngx_http_auth_stormpath_module);
 
@@ -301,50 +352,6 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
     sr->method_name = strings.http_method_post;
     sr->header_only = 1;
 
-    /* init subrequest headers */
-    if (ngx_list_init(&sr->headers_in.headers, sr->pool, 20,
-            sizeof(ngx_table_elt_t)) != NGX_OK)
-    {
-        return NGX_ERROR;
-    }
-
-    h = ngx_http_auth_stormpath_add_header(sr, strings.content_type,
-        strings.application_json);
-    if (h == NULL) {
-        return NGX_ERROR;
-    }
-    sr->headers_in.content_type = h;
-
-    h = ngx_http_auth_stormpath_add_header(sr, strings.accept,
-        strings.application_json);
-    if (h == NULL) {
-        return NGX_ERROR;
-    }
-#if (NGX_HTTP_HEADERS)
-    sr->headers_in.accept = h;
-#endif
-
-    h = ngx_http_auth_stormpath_add_header(sr, strings.user_agent,
-        strings.user_agent_value);
-    if (h == NULL) {
-        return NGX_ERROR;
-    }
-    sr->headers_in.user_agent = h;
-
-    h = ngx_http_auth_stormpath_add_header(sr, strings.host,
-        strings.api_stormpath_com);
-    if (h == NULL) {
-        return NGX_ERROR;
-    }
-    sr->headers_in.host = h;
-
-    h = ngx_http_auth_stormpath_add_header(sr, strings.authorization,
-        cf->apikey);
-    if (h == NULL) {
-        return NGX_ERROR;
-    }
-    sr->headers_in.authorization = h;
-
     sr->request_body = ngx_pcalloc(r->pool, sizeof(ngx_http_request_body_t));
     if (sr->request_body == NULL) {
         return NGX_ERROR;
@@ -365,12 +372,6 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
     ngx_sprintf(auth_data, "{\"type\": \"basic\", \"value\": \"%V\"}",
         &encoded_userpwd);
 
-    h = ngx_http_auth_stormpath_add_content_length_header(sr,
-        auth_data);
-    if (h == NULL) {
-        return NGX_ERROR;
-    }
-    sr->headers_in.content_length = h;
     sr->headers_in.content_length_n = ngx_strlen(auth_data);
 
     b->temporary = 1;
@@ -388,15 +389,32 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
 
     sr->header_in = r->header_in;
     sr->internal = 1;
+    sr->uri = cf->app_uri;
 
-    /* XXX work-around a bug in ngx_http_subrequest */
-
-    if (r->headers_in.headers.last == &r->headers_in.headers.part) {
-        sr->headers_in.headers.last = &sr->headers_in.headers.part;
-    }
     ctx->subrequest = sr;
 
     ngx_http_set_ctx(r, ctx, ngx_http_auth_stormpath_module);
+
+    if (ngx_http_upstream_create(sr) != NGX_OK) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    u = sr->upstream;
+    u->output.tag = (ngx_buf_tag_t) &ngx_http_auth_stormpath_module;
+    u->conf = &cf->upstream;
+    u->ssl = 1;
+
+    u->create_request = ngx_http_auth_stormpath_create_request;
+    u->reinit_request = ngx_http_auth_stormpath_reinit_request;
+    u->process_header = ngx_http_auth_stormpath_process_status_line;
+    u->abort_request = ngx_http_auth_stormpath_abort_request;
+    u->finalize_request = ngx_http_auth_stormpath_finalize_request;
+    u->input_filter_init = ngx_http_auth_stormpath_filter_init;
+    u->input_filter = ngx_http_auth_stormpath_input_filter;
+
+    sr->upstream = u;
+
+    ngx_http_upstream_init(sr);
 
     return NGX_AGAIN;
 }
@@ -406,9 +424,6 @@ static ngx_int_t
 ngx_http_auth_stormpath_done(ngx_http_request_t *r, void *data, ngx_int_t rc)
 {
     ngx_http_auth_stormpath_ctx_t   *ctx = data;
-
-    ngx_log_debug1(NGX_LOG_ERR, r->connection->log, 0,
-                   "Stormpath API request done s:%d", r->headers_out.status);
 
     ctx->done = 1;
     ctx->status = r->headers_out.status;
@@ -467,6 +482,13 @@ ngx_http_auth_stormpath(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_http_auth_stormpath_conf_t *ascf = conf;
     ngx_str_t                      *value;
+    ngx_http_upstream_srv_conf_t   *uscf, **uscfp;
+    ngx_http_upstream_main_conf_t  *umcf;
+    ngx_http_upstream_server_t     *s;
+    ngx_url_t                       u;
+    u_char                         *prefix = (u_char *) "https://api.stormpath.com";
+    size_t                          prefix_len;
+    ngx_pool_cleanup_t  *cln;
 
     if (ascf->app_href.data != NULL) {
         return "is duplicate";
@@ -481,9 +503,109 @@ ngx_http_auth_stormpath(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return NGX_CONF_OK;
     }
 
+    prefix_len = ngx_strlen(prefix);
+    if (value[1].len < prefix_len) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "invalid application href \"%V\"", &(value[1]));
+        return NGX_CONF_ERROR;
+    }
+    if (ngx_memcmp(prefix, value[1].data, prefix_len)) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "invalid application href \"%V\"", &(value[1]));
+        return NGX_CONF_ERROR;
+    }
+
     ascf->app_href = value[1];
+    ascf->app_uri.len = ascf->app_href.len - prefix_len;
+    ascf->app_uri.data = ngx_pcalloc(cf->pool, ascf->app_uri.len);
+    (void) ngx_copy(ascf->app_uri.data, ascf->app_href.data + prefix_len,
+        ascf->app_uri.len);
+
+    umcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_module);
+
+    uscf = ngx_pcalloc(cf->pool, sizeof(ngx_http_upstream_srv_conf_t));
+    if (uscf == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    uscf->flags = 0;
+    uscf->host = ascf->app_href;
+    uscf->file_name = cf->conf_file->file.name.data;
+    uscf->line = cf->conf_file->line;
+    uscf->port = 443;
+    uscf->default_port = 443;
+    uscf->no_port = 0;
+
+    uscfp = ngx_array_push(&umcf->upstreams);
+    if (uscfp == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    *uscfp = uscf;
+
+    uscf->servers = ngx_array_create(cf->pool, 1,
+        sizeof(ngx_http_upstream_server_t));
+    if (uscf->servers == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    s = ngx_array_push(uscf->servers);
+    if (s == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    ngx_memzero(&u, sizeof(ngx_url_t));
+
+    u.url = strings.api_stormpath_com;
+    u.default_port = 443;
+
+    if (ngx_parse_url(cf->pool, &u) != NGX_OK) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "%s in stormpath \"%V\"", u.err, &u.url);
+        return NGX_CONF_ERROR;
+    }
+
+    s->name = ascf->app_href;
+    s->addrs = u.addrs;
+    s->naddrs = u.naddrs;
+    s->weight = 1;
+    s->max_fails = 1;
+    s->fail_timeout = 10;
+    s->down = 0;
+    s->backup = 0;
+
+    ascf->upstream.upstream = uscf;
+    ascf->upstream.timeout = 10000;
+    ascf->upstream.connect_timeout = 10000;
+    ascf->upstream.send_timeout = 10000;
+    ascf->upstream.read_timeout = 10000;
+    ascf->upstream.pass_request_headers = 1;
+    ascf->upstream.pass_request_body = 1;
+    ascf->upstream.buffer_size = ngx_pagesize;
+
+    ascf->upstream.ssl = ngx_pcalloc(cf->pool, sizeof(ngx_ssl_t));
+    if (ascf->upstream.ssl == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    ascf->upstream.ssl->log = cf->log;
+
+    if (ngx_ssl_create(ascf->upstream.ssl, NGX_SSL_TLSv1, NULL)
+        != NGX_OK)
+    {
+        return NGX_CONF_ERROR;
+    }
+
+    cln = ngx_pool_cleanup_add(cf->pool, 0);
+    if (cln == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    cln->handler = ngx_ssl_cleanup_ctx;
+    cln->data = ascf->upstream.ssl;
 
     return NGX_CONF_OK;
+
 }
 
 static ngx_str_t
