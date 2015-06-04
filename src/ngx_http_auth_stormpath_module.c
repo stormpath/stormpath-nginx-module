@@ -11,6 +11,7 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
+#define NGX_HTTP_AUTH_STORMPATH_BUF_SIZE 8192
 typedef struct {
     ngx_str_t                 app_href;
     ngx_str_t                 app_uri;
@@ -57,7 +58,7 @@ static ngx_command_t  ngx_http_auth_stormpath_commands[] = {
       NULL },
 
     { ngx_string("auth_stormpath_apikey"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE2,
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
       ngx_http_auth_stormpath_apikey,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_auth_stormpath_conf_t, apikey),
@@ -613,7 +614,6 @@ ngx_http_auth_stormpath_encode_conf_id_secret(ngx_conf_t *cf,
     ngx_str_t id, ngx_str_t secret)
 {
     ngx_str_t txt, enc, err = ngx_null_string;
-    u_char *p;
 
     txt.len = id.len + 1 + secret.len;
     txt.data = ngx_pnalloc(cf->pool, txt.len);
@@ -622,24 +622,88 @@ ngx_http_auth_stormpath_encode_conf_id_secret(ngx_conf_t *cf,
     }
     ngx_snprintf(txt.data, txt.len, "%V:%V", &id, &secret);
 
-    enc.len = 6 + txt.len * 2;
+    enc.len = txt.len * 2;
     enc.data = ngx_pnalloc(cf->pool, enc.len);
     if (enc.data == NULL) {
         return err;
     }
 
-    ngx_memcpy(enc.data, "Basic ", 6);
-    p = enc.data;
-    enc.data += 6;
-    enc.len -= 6;
-
     ngx_encode_base64(&enc, &txt);
-
-    enc.data = p;
-    enc.len += 6;
 
     return enc;
 }
+
+/* parser for Java properties file format, simplified as in use by Stormpath
+ * for API key and secret
+ * http://docs.oracle.com/cd/E23095_01/Platform.93/ATGProgGuide/html/s0204propertiesfileformat01.html
+ * notably, doesn't support quoting (backslashes) and line continuation
+ */
+static char *
+parse_apikey_file(ngx_conf_t *cf, u_char *p, ngx_str_t *id, ngx_str_t *secret)
+{
+    u_char *key;
+    u_char *value;
+    ngx_str_t *str;
+
+    id->len = 0;
+    secret->len = 0;
+
+    while (*p) {
+        key = NULL;
+        value = NULL;
+
+        /* skip leading spaces */
+        while ((*p == '\n') || (*p == '\r') || (*p == ' ') || (*p == '\t')) p++;
+        /* if it's a comment, skip to the end of the line */
+        if ((*p == '#') || (*p == '!')) {
+            while ((*p != '\n') && (*p != '\r') && (*p != '\0')) p++;
+        }
+        /* if the line is empty or comment, skip the line */
+        if ((*p == '\n') || (*p == '\r')) {
+            p++;
+            continue;
+        }
+
+        /* scan the key portion */
+        key = p;
+        while ((*p != ' ') && (*p != '=') && (*p != ':') && (*p != '\0')) p++;
+        if (*p == '\0') break;
+
+        /* terminate the key portion and scan over the syntax */
+        *p++ = '\0';
+        while ((*p == ' ') || (*p == '=') || (*p == ':')) p++;
+
+        /* scan the value portion */
+        value = p;
+        while ((*p != ' ') && (*p != '\r') && (*p != '\n') && (*p != '\0')) p++;
+        /* got the key/value pair, handle it and either finish or iterate */
+        if (*p != '\0') {
+            *p++ = '\0';
+        }
+
+        if (!ngx_strcasecmp(key, (u_char *) "apiKey.id")) {
+            str = id;
+        } else if (!ngx_strcasecmp(key, (u_char *) "apiKey.secret")) {
+            str = secret;
+        } else {
+            continue;
+        }
+
+        str->len = ngx_strlen(value);
+        str->data = ngx_pnalloc(cf->pool, str->len);
+        if (str->data == NULL) {
+            return NGX_CONF_ERROR;
+        }
+        (void)ngx_copy(str->data, value, str->len);
+    }
+
+    if ((id->len > 0) && (secret->len) > 0) {
+        return NGX_CONF_OK;
+    } else {
+        return "apiKey id or secret not found in properties file";
+    }
+}
+
 
 static char *
 ngx_http_auth_stormpath_apikey(ngx_conf_t *cf, ngx_command_t *cmd,
@@ -647,6 +711,11 @@ ngx_http_auth_stormpath_apikey(ngx_conf_t *cf, ngx_command_t *cmd,
 {
     ngx_http_auth_stormpath_conf_t *ascf = conf;
     ngx_str_t                      *value;
+    ngx_fd_t fd;
+    ngx_file_t file;
+    u_char                          buf[NGX_HTTP_AUTH_STORMPATH_BUF_SIZE];
+    ssize_t n;
+    ngx_str_t id, secret;
 
     if (ascf->apikey.data != NULL) {
         return "is duplicate";
@@ -654,8 +723,24 @@ ngx_http_auth_stormpath_apikey(ngx_conf_t *cf, ngx_command_t *cmd,
 
     value = cf->args->elts;
 
+    fd = ngx_open_file(value[1].data, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
+    if (fd == NGX_INVALID_FILE) {
+        return "Stormpath API properties file open failed";
+    }
+
+    ngx_memzero(&file, sizeof(ngx_file_t));
+    file.fd = fd;
+    file.name = value[1];
+
+    n = ngx_read_file(&file, buf, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE, 0);
+    if (n == NGX_ERROR) {
+        ngx_close_file(fd);
+    }
+
+    parse_apikey_file(cf, buf, &id, &secret);
+
     ascf->apikey = ngx_http_auth_stormpath_encode_conf_id_secret(cf,
-        value[1], value[2]);
+        id, secret);
 
     return NGX_CONF_OK;
 }
