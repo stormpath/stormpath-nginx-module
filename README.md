@@ -58,32 +58,18 @@ authorize against.
 To enable Stormpath authorization for a specific location block inside nginx
 config, add the following two settings:
 
-    auth_stormpath /_auth_upstream;
-    auth_stormpath_apikey YOUR-API-KEY-ID YOUR-API-KEY-SECRET;
-
-Then, also add another location, `/_auth_upstream` (name doesn't matter as
-long as it matches what was passed to `auth_stormpath` setting) with the
-following settings:
-
-    location /_auth_upstream {
-        proxy_pass FULL-HREF-OF-YOUR-STORMPATH-APPLICATION/loginAttempts;
-        proxy_http_version 1.1;
-        proxy_pass_request_body on;
-    }
-
-The `proxy_pass` value should look something like `https://api.stormpath.com/v1/applications/somerandomid/loginAttempts`.
+    auth_stormpath https://api.stormpath.com/v1/applications/YOUR-APP-HREF;
+    auth_stormpath_apikey /path/to/your/apiKey.properties;
 
 ## Known issues
 
 This is far, far away from complete module, it's more like a prototype to test
 the waters. Biggest known problems with the module as is:
 
-* needs upstream configuration block (the other `location` in the config)
-  instead of generating it internally when needed
-* takes API key ID and secret directly in the config file, instead of reading
-  them from apiKey.properties file
 * doesn't cache loginAttempt responses, so Stormpath API call will be made for
   *every* request made for the location
+* reinvents HTTP request creation and parsing, and Java .properties file parsing,
+  probably containing nasty bugs in related portions of code
 
 ## Copyright
 
