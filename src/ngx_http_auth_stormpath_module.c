@@ -1,4 +1,3 @@
-
 /*
  * Copyright (C) Maxim Dounin
  * Copyright (C) Nginx, Inc.
@@ -12,6 +11,8 @@
 #include <ngx_http.h>
 
 #define NGX_HTTP_AUTH_STORMPATH_BUF_SIZE 8192
+
+
 typedef struct {
     ngx_str_t                 app_href;
     ngx_str_t                 app_uri;
@@ -26,17 +27,36 @@ typedef struct {
     ngx_http_request_t       *subrequest;
 } ngx_http_auth_stormpath_ctx_t;
 
+
 static struct {
     ngx_str_t http_method_post;
     ngx_str_t api_stormpath_com;
     ngx_str_t realm_stormpath;
 } strings = {
-    { 4, (u_char *) "POST " }, // nginx deliberately offs-by-one here
+    { 4, (u_char *) "POST " }, /* nginx deliberately offs-by-one here */
     ngx_string("api.stormpath.com"),
     ngx_string("Protected by Stormpath"),
 };
 
+
+static ngx_int_t ngx_http_auth_stormpath_set_realm(ngx_http_request_t *r,
+    ngx_str_t *realm);
+static ngx_str_t ngx_http_auth_stormpath_encode_user_pass(
+    ngx_http_request_t *r, ngx_str_t user, ngx_str_t pass);
 static ngx_int_t ngx_http_auth_stormpath_handler(ngx_http_request_t *r);
+
+static ngx_int_t ngx_http_auth_stormpath_create_request(ngx_http_request_t *r);
+static ngx_int_t ngx_http_auth_stormpath_process_status_line(
+    ngx_http_request_t *r);
+static ngx_int_t ngx_http_auth_stormpath_process_header(ngx_http_request_t *r);
+static ngx_int_t ngx_http_auth_stormpath_reinit_request(ngx_http_request_t *r);
+void ngx_http_auth_stormpath_abort_request(ngx_http_request_t *r);
+void ngx_http_auth_stormpath_finalize_request(ngx_http_request_t *r,
+    ngx_int_t rc);
+static ngx_int_t ngx_http_auth_stormpath_filter_init(void *data);
+static ngx_int_t ngx_http_auth_stormpath_input_filter(void *data,
+    ssize_t bytes);
+
 static ngx_int_t ngx_http_auth_stormpath_done(ngx_http_request_t *r,
     void *data, ngx_int_t rc);
 static void *ngx_http_auth_stormpath_create_conf(ngx_conf_t *cf);
@@ -47,6 +67,7 @@ static char *ngx_http_auth_stormpath(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_auth_stormpath_apikey(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
+
 
 static ngx_command_t  ngx_http_auth_stormpath_commands[] = {
 
@@ -98,8 +119,10 @@ ngx_module_t  ngx_http_auth_stormpath_module = {
     NGX_MODULE_V1_PADDING
 };
 
-/* this is directly copied from ngx_http_auth_stormpath_set_realm, too
- * bad it isn't originally exposed */
+
+/* Set WWW-Authenticate header in the response so the client knows they need
+ * to authenticate. This verbatim copy of ngx_http_auth_stormpath_set_realm,
+ * which is unfortunately not an externally-visible symbol. */
 static ngx_int_t
 ngx_http_auth_stormpath_set_realm(ngx_http_request_t *r, ngx_str_t *realm)
 {
@@ -131,6 +154,9 @@ ngx_http_auth_stormpath_set_realm(ngx_http_request_t *r, ngx_str_t *realm)
 }
 
 
+/* Base64-encode account username and password for loginAttempt, as per
+ * http://docs.stormpath.com/rest/product-guide/#application-account-authc
+ */
 static ngx_str_t
 ngx_http_auth_stormpath_encode_user_pass(ngx_http_request_t *r,
     ngx_str_t user, ngx_str_t pass)
@@ -151,10 +177,14 @@ ngx_http_auth_stormpath_encode_user_pass(ngx_http_request_t *r,
     }
 
     ngx_encode_base64(&enc, &txt);
-
     return enc;
 }
 
+
+/* create_request handler for the Stormpath API upstream. Since we'll be
+ * using the upstream ourselves, we know exactly how the request should be
+ * made and are basically constructing it from scratch here (as opposed to
+ * doing so in the handler, manipulating the subrequest object). */
 static ngx_int_t
 ngx_http_auth_stormpath_create_request(ngx_http_request_t *r)
 {
@@ -162,9 +192,10 @@ ngx_http_auth_stormpath_create_request(ngx_http_request_t *r)
     ngx_chain_t *cl;
     ngx_http_auth_stormpath_conf_t *cf;
 
-    cf = ngx_http_get_module_loc_conf(r->parent, ngx_http_auth_stormpath_module);
+    cf = ngx_http_get_module_loc_conf(r->parent,
+        ngx_http_auth_stormpath_module);
 
-    b = ngx_create_temp_buf(r->pool, 65536);
+    b = ngx_create_temp_buf(r->pool, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE);
     if (b == NULL)
         return NGX_ERROR;
 
@@ -175,7 +206,7 @@ ngx_http_auth_stormpath_create_request(ngx_http_request_t *r)
     cl->buf = b;
     r->upstream->request_bufs = cl;
 
-    ngx_snprintf(b->pos, 65535,
+    ngx_snprintf(b->pos, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE - 1,
         "POST %V/loginAttempts HTTP/1.1\r\n"
         "Host: api.stormpath.com\r\n"
         "Content-Type: application/json\r\n"
@@ -194,6 +225,38 @@ ngx_http_auth_stormpath_create_request(ngx_http_request_t *r)
     return NGX_OK;
 }
 
+
+/* First-phase process_header handler for Stormpath API upstream. It attempts
+ * to parse the status line, fetching the status code, and then pass control
+ * on to ngx_http_auth_stormpath_process_header so it can parse the rest of
+ * the headers. We're only ever interested in the status code, tho. */
+static ngx_int_t
+ngx_http_auth_stormpath_process_status_line(ngx_http_request_t *r)
+{
+    ngx_int_t rc;
+    ngx_http_status_t status;
+
+    ngx_memzero(&status, sizeof(ngx_http_status_t));
+
+    rc = ngx_http_parse_status_line(r, &r->upstream->buffer, &status);
+    if (rc == NGX_AGAIN) {
+        return rc;
+    }
+
+    if (rc == NGX_OK) {
+        r->upstream->headers_in.status_n = status.code;
+        r->upstream->process_header = ngx_http_auth_stormpath_process_header;
+        return ngx_http_auth_stormpath_process_header(r);
+    }
+
+    return NGX_HTTP_UPSTREAM_INVALID_HEADER;
+}
+
+
+/* Second-phase process_header handler for Stormpath API upstream. We're not
+ * interested in any headers so we ignore them all, but still go through the
+ * motions so the response is properly validated (ie. rejected on an invalid
+ * header). */
 static ngx_int_t
 ngx_http_auth_stormpath_process_header(ngx_http_request_t *r)
 {
@@ -223,28 +286,10 @@ ngx_http_auth_stormpath_process_header(ngx_http_request_t *r)
     return NGX_OK;
 }
 
-static ngx_int_t
-ngx_http_auth_stormpath_process_status_line(ngx_http_request_t *r)
-{
-    ngx_int_t rc;
-    ngx_http_status_t status;
 
-    ngx_memzero(&status, sizeof(ngx_http_status_t));
-
-    rc = ngx_http_parse_status_line(r, &r->upstream->buffer, &status);
-    if (rc == NGX_AGAIN) {
-        return rc;
-    }
-
-    if (rc == NGX_OK) {
-        r->upstream->headers_in.status_n = status.code;
-        r->upstream->process_header = ngx_http_auth_stormpath_process_header;
-        return ngx_http_auth_stormpath_process_header(r);
-    }
-
-    return NGX_HTTP_UPSTREAM_INVALID_HEADER;
-}
-
+/* If the upstream request is to be repeated (ie. connection to the Stormpath
+ * API breaks and we want to retry), we need to reset the process_header
+ * handler back to the first-phase, the status line parser. */
 static ngx_int_t
 ngx_http_auth_stormpath_reinit_request(ngx_http_request_t *r)
 {
@@ -252,30 +297,40 @@ ngx_http_auth_stormpath_reinit_request(ngx_http_request_t *r)
     return NGX_OK;
 }
 
+
 void
 ngx_http_auth_stormpath_abort_request(ngx_http_request_t *r)
 {
+    /* nothing to do here, but we still need to provide it */
 }
+
 
 void
 ngx_http_auth_stormpath_finalize_request(ngx_http_request_t *r,
     ngx_int_t rc)
 {
+    /* nothing to do here, but we still need to provide it */
 }
+
 
 static ngx_int_t
 ngx_http_auth_stormpath_filter_init(void *data)
 {
+    /* nothing to do here, but we still need to provide it */
     return NGX_OK;
 }
+
 
 static ngx_int_t
 ngx_http_auth_stormpath_input_filter(void *data, ssize_t bytes)
 {
+    /* nothing to do here, but we still need to provide it */
     return NGX_OK;
 }
 
 
+/* Handler to be executed when request wants a location with stormpath_auth.
+ */
 static ngx_int_t
 ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
 {
@@ -290,6 +345,7 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
 
     cf = ngx_http_get_module_loc_conf(r, ngx_http_auth_stormpath_module);
 
+    /* Reject all requests by default is server is not properly configured. */
     if ((cf->app_href.len == 0) || (cf->apikey.len == 0)) {
         return NGX_DECLINED;
     }
@@ -297,15 +353,21 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
     ctx = ngx_http_get_module_ctx(r, ngx_http_auth_stormpath_module);
 
     if (ctx != NULL) {
+        /* We're already in the middle of processing this request. If the
+         * sub request is still in-flight, ask nginx to invoke us later. */
         if (!ctx->done) {
             return NGX_AGAIN;
         }
 
+        /* Subrequest returned 200 OK, which means we're fine and allow the
+         * location access. */
         if (ctx->status == NGX_HTTP_OK)
         {
             return NGX_OK;
         }
 
+        /* Subrequest returned 401, meaning our Stormpath API credentials are
+         * incorrect, which is a server error (not the client's fault). */
         if (ctx->status == NGX_HTTP_UNAUTHORIZED) {
             ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                           "invalid Stormpath API credentials");
@@ -313,6 +375,8 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
             return NGX_HTTP_INTERNAL_SERVER_ERROR;
         }
 
+        /* Subrequest returned 400, meaning the login attempt failed. We set
+         * HTTP basic authentication challenge header and we're done here. */
         if (ctx->status == NGX_HTTP_BAD_REQUEST) {
             ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                           "Stormpath login attempt failed");
@@ -320,16 +384,25 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
             return ngx_http_auth_stormpath_set_realm(r, &strings.realm_stormpath);
         }
 
+        /* Something unexpected happened, the safest choice is to treat it as
+         * server error. */
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                       "auth stormpath unexpected status: %d", ctx->status);
 
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
+    /* So it's a new request we haven't started handling yet. */
+
+    /* We know we require basic auth from the client. If it's not provided,
+     * we can immediately request it and end the handling. */
     if (ngx_http_auth_basic_user(r) == NGX_DECLINED) {
         return ngx_http_auth_stormpath_set_realm(r, &strings.realm_stormpath);
     }
 
+    /* The fun starts here. We allocate our per-request context and set up
+     * a subrequest that will use our internal Stormpath API upstream to
+     * do a login attempt and verify the credentials. */
     ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_auth_stormpath_ctx_t));
     if (ctx == NULL) {
         return NGX_ERROR;
@@ -369,9 +442,9 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
         return NGX_ERROR;
     }
 
-    auth_data = ngx_pcalloc(r->pool, 8192);
-    ngx_sprintf(auth_data, "{\"type\": \"basic\", \"value\": \"%V\"}",
-        &encoded_userpwd);
+    auth_data = ngx_pcalloc(r->pool, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE);
+    ngx_snprintf(auth_data, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE - 1,
+        "{\"type\": \"basic\", \"value\": \"%V\"}", &encoded_userpwd);
 
     sr->headers_in.content_length_n = ngx_strlen(auth_data);
 
@@ -396,6 +469,10 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
 
     ngx_http_set_ctx(r, ctx, ngx_http_auth_stormpath_module);
 
+    /* We create the Stormpath API upstream internally instead of asking the
+     * user to set it up in the config file. TODO: check if a single upstream
+     * should be reused across requests or it's fine to create it anew for
+     * each one (the upstream config file *is* reused tho). */
     if (ngx_http_upstream_create(sr) != NGX_OK) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
@@ -421,6 +498,9 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
 }
 
 
+/* When the subrequest is done, we mark it as such and pluck out the response
+ * status from the response. For now that's all we need to figure out the
+ * status of the login attempt. */
 static ngx_int_t
 ngx_http_auth_stormpath_done(ngx_http_request_t *r, void *data, ngx_int_t rc)
 {
@@ -460,6 +540,9 @@ ngx_http_auth_stormpath_merge_conf(ngx_conf_t *cf, void *parent, void *child)
 }
 
 
+/* Initialize the stormpath module and add our handler to the list of nginx
+ * access handlers (so that it'll be invoked to figure out whether access to
+ * a location is permitted). */
 static ngx_int_t
 ngx_http_auth_stormpath_init(ngx_conf_t *cf)
 {
@@ -478,6 +561,16 @@ ngx_http_auth_stormpath_init(ngx_conf_t *cf)
     return NGX_OK;
 }
 
+
+/* Parse 'auth_stormpath' directive in the config file. The directive takes
+ * only one parameter, a full href of the application to authenticate against.
+ * The parser verifies the prefix is correct Stormpath API URL, and then
+ * creates an upstream configuration pointing to the Stormpath API, which
+ * the subrequests will later use to authenticate against this app.
+ *
+ * TODO: check if we should only create one upstream for multiple directives,
+ * so it's reused/doesn't clash.
+ */
 static char *
 ngx_http_auth_stormpath(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
@@ -609,6 +702,11 @@ ngx_http_auth_stormpath(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
 }
 
+
+/* Encode the Stormpath API credentials so they can be easily used in the
+ * subrequests to the API. This is virtually identical to
+ * ngx_http_auth_stormpath_encode_user_pass but uses different memory
+ * allocation mechanism (config pool vs request pool) so can't be the same. */
 static ngx_str_t
 ngx_http_auth_stormpath_encode_conf_id_secret(ngx_conf_t *cf,
     ngx_str_t id, ngx_str_t secret)
@@ -633,10 +731,11 @@ ngx_http_auth_stormpath_encode_conf_id_secret(ngx_conf_t *cf,
     return enc;
 }
 
-/* parser for Java properties file format, simplified as in use by Stormpath
- * for API key and secret
+
+/* Parser for Java properties file format, simplified as in use by Stormpath
+ * for API key and secret.
  * http://docs.oracle.com/cd/E23095_01/Platform.93/ATGProgGuide/html/s0204propertiesfileformat01.html
- * notably, doesn't support quoting (backslashes) and line continuation
+ * Notably, it doesn't support quoting (backslashes) and line continuation.
  */
 static char *
 parse_apikey_file(ngx_conf_t *cf, u_char *p, ngx_str_t *id, ngx_str_t *secret)
@@ -705,6 +804,10 @@ parse_apikey_file(ngx_conf_t *cf, u_char *p, ngx_str_t *id, ngx_str_t *secret)
 }
 
 
+/* Parse 'auth_stormpath_apikey' directive in the config file. The directive
+ * takes one parameter, a path to .properties file containing Stormpath API
+ * credentials (ID and secret).
+ */
 static char *
 ngx_http_auth_stormpath_apikey(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf)
