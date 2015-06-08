@@ -29,7 +29,7 @@ on Debian or Ubuntu based system, you can accomplish this easily with:
 
 Get the latest Stormpath nginx module source code:
 
-    git clone git@github.com:senko/stormpath-nginx-module.git
+    git clone git@github.com:stormpath/stormpath-nginx-module.git
 
 Get the latest nginx source code:
 
