@@ -188,8 +188,8 @@ ngx_http_auth_stormpath_encode_user_pass(ngx_http_request_t *r,
 static ngx_int_t
 ngx_http_auth_stormpath_create_request(ngx_http_request_t *r)
 {
-    ngx_buf_t *b;
-    ngx_chain_t *cl;
+    ngx_buf_t                      *b;
+    ngx_chain_t                    *cl;
     ngx_http_auth_stormpath_conf_t *cf;
 
     cf = ngx_http_get_module_loc_conf(r->parent,
@@ -232,7 +232,7 @@ ngx_http_auth_stormpath_create_request(ngx_http_request_t *r)
 static ngx_int_t
 ngx_http_auth_stormpath_process_status_line(ngx_http_request_t *r)
 {
-    ngx_int_t rc;
+    ngx_int_t         rc;
     ngx_http_status_t status;
 
     ngx_memzero(&status, sizeof(ngx_http_status_t));
@@ -503,7 +503,7 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
 static ngx_int_t
 ngx_http_auth_stormpath_done(ngx_http_request_t *r, void *data, ngx_int_t rc)
 {
-    ngx_http_auth_stormpath_ctx_t   *ctx = data;
+    ngx_http_auth_stormpath_ctx_t *ctx = data;
 
     ctx->done = 1;
     ctx->status = r->headers_out.status;
@@ -515,7 +515,7 @@ ngx_http_auth_stormpath_done(ngx_http_request_t *r, void *data, ngx_int_t rc)
 static void *
 ngx_http_auth_stormpath_create_conf(ngx_conf_t *cf)
 {
-    ngx_http_auth_stormpath_conf_t  *conf;
+    ngx_http_auth_stormpath_conf_t *conf;
 
     conf = ngx_pcalloc(cf->pool, sizeof(ngx_http_auth_stormpath_conf_t));
     if (conf == NULL) {
@@ -739,8 +739,8 @@ ngx_http_auth_stormpath_encode_conf_id_secret(ngx_conf_t *cf,
 static char *
 parse_apikey_file(ngx_conf_t *cf, u_char *p, ngx_str_t *id, ngx_str_t *secret)
 {
-    u_char *key;
-    u_char *value;
+    u_char    *key;
+    u_char    *value;
     ngx_str_t *str;
 
     id->len = 0;
@@ -813,11 +813,11 @@ ngx_http_auth_stormpath_apikey(ngx_conf_t *cf, ngx_command_t *cmd,
 {
     ngx_http_auth_stormpath_conf_t *ascf = conf;
     ngx_str_t                      *value;
-    ngx_fd_t fd;
-    ngx_file_t file;
+    ngx_fd_t                        fd;
+    ngx_file_t                      file;
     u_char                          buf[NGX_HTTP_AUTH_STORMPATH_BUF_SIZE];
-    ssize_t n;
-    ngx_str_t id, secret;
+    ssize_t                         n;
+    ngx_str_t                       id, secret;
 
     if (ascf->apikey.data != NULL) {
         return "is duplicate";
