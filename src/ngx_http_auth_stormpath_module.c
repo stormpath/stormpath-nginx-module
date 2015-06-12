@@ -43,6 +43,9 @@ static ngx_int_t ngx_http_auth_stormpath_set_realm(ngx_http_request_t *r,
     ngx_str_t *realm);
 static ngx_str_t ngx_http_auth_stormpath_encode_user_pass(
     ngx_http_request_t *r, ngx_str_t user, ngx_str_t pass);
+ngx_http_request_t *ngx_http_auth_stormpath_make_request(ngx_str_t *href,
+    ngx_str_t uri, ngx_str_t encoded_userpwd,
+    ngx_http_request_t *parent, ngx_http_auth_stormpath_ctx_t *ctx);
 static ngx_int_t ngx_http_auth_stormpath_handler(ngx_http_request_t *r);
 
 static ngx_int_t ngx_http_auth_stormpath_create_request(ngx_http_request_t *r);
@@ -334,12 +337,9 @@ static ngx_int_t
 ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
 {
     ngx_http_request_t             *sr;
-    ngx_http_post_subrequest_t     *ps;
     ngx_http_auth_stormpath_ctx_t  *ctx;
     ngx_http_auth_stormpath_conf_t *cf;
-    ngx_buf_t                      *b;
     ngx_str_t                       encoded_userpwd;
-    ngx_http_upstream_t            *u;
 
     cf = ngx_http_get_module_loc_conf(r, ngx_http_auth_stormpath_module);
 
@@ -350,97 +350,129 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_auth_stormpath_module);
 
-    if (ctx != NULL) {
-        /* We're already in the middle of processing this request. If the
-         * sub request is still in-flight, ask nginx to invoke us later. */
-        if (!ctx->done) {
-            return NGX_AGAIN;
+    if (ctx == NULL) {
+        /* It's a new request we haven't started handling yet. */
+
+        /* We know we require basic auth from the client. If it's not provided,
+         * we can immediately request it and end the handling. */
+        if (ngx_http_auth_basic_user(r) == NGX_DECLINED) {
+            return ngx_http_auth_stormpath_set_realm(r,
+                &strings.realm_stormpath);
         }
 
-        /* Subrequest returned 200 OK, which means we're fine and allow the
-         * location access. */
-        if (ctx->status == NGX_HTTP_OK)
-        {
-            return NGX_OK;
+        /* The fun starts here. We allocate our per-request context and set up
+         * a subrequest that will use our internal Stormpath API upstream to
+         * do a login attempt and verify the credentials. */
+        ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_auth_stormpath_ctx_t));
+        if (ctx == NULL) {
+            return NGX_ERROR;
         }
 
-        /* Subrequest returned 401, meaning our Stormpath API credentials are
-         * incorrect, which is a server error (not the client's fault). */
-        if (ctx->status == NGX_HTTP_UNAUTHORIZED) {
-            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-                          "invalid Stormpath API credentials");
-
-            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        encoded_userpwd = ngx_http_auth_stormpath_encode_user_pass(r,
+            r->headers_in.user, r->headers_in.passwd);
+        if (encoded_userpwd.len == 0) {
+            return NGX_ERROR;
         }
 
-        /* Subrequest returned 400, meaning the login attempt failed. We set
-         * HTTP basic authentication challenge header and we're done here. */
-        if (ctx->status == NGX_HTTP_BAD_REQUEST) {
-            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-                          "Stormpath login attempt failed");
-
-            return ngx_http_auth_stormpath_set_realm(r, &strings.realm_stormpath);
+        sr = ngx_http_auth_stormpath_make_request(&cf->app_href, cf->app_uri,
+            encoded_userpwd, r, ctx);
+        if (sr == NULL) {
+            return NGX_ERROR;
         }
 
-        /* Something unexpected happened, the safest choice is to treat it as
-         * server error. */
+        return NGX_AGAIN;
+    }
+
+    /* If the sub request is still in-flight, ask nginx to invoke us later. */
+    if (!ctx->done) {
+        return NGX_AGAIN;
+    }
+
+    /* Subrequest returned 200 OK, which means we're fine and allow the
+     * location access. */
+    if (ctx->status == NGX_HTTP_OK)
+    {
+        return NGX_OK;
+    }
+
+    /* Subrequest returned 401, meaning our Stormpath API credentials are
+     * incorrect, which is a server error (not the client's fault). */
+    if (ctx->status == NGX_HTTP_UNAUTHORIZED) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-                      "auth stormpath unexpected status: %d", ctx->status);
+                      "invalid Stormpath API credentials");
 
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    /* So it's a new request we haven't started handling yet. */
+    /* Subrequest returned 400, meaning the login attempt failed. We set
+     * HTTP basic authentication challenge header and we're done here. */
+    if (ctx->status == NGX_HTTP_BAD_REQUEST) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "Stormpath login attempt failed");
 
-    /* We know we require basic auth from the client. If it's not provided,
-     * we can immediately request it and end the handling. */
-    if (ngx_http_auth_basic_user(r) == NGX_DECLINED) {
         return ngx_http_auth_stormpath_set_realm(r, &strings.realm_stormpath);
     }
 
-    /* The fun starts here. We allocate our per-request context and set up
-     * a subrequest that will use our internal Stormpath API upstream to
-     * do a login attempt and verify the credentials. */
-    ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_auth_stormpath_ctx_t));
-    if (ctx == NULL) {
-        return NGX_ERROR;
-    }
+    /* Something unexpected happened, the safest choice is to treat it as
+     * server error. */
+    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                  "auth stormpath unexpected status: %d", ctx->status);
 
-    ps = ngx_palloc(r->pool, sizeof(ngx_http_post_subrequest_t));
+    return NGX_HTTP_INTERNAL_SERVER_ERROR;
+}
+
+/* Build and issue the request to the Stormpath API. In contrast to
+ * http_auth_stormpath_create_request, which takes care of speaking with the
+ * upstream, this function takes care of actually setting up the
+ * ngx_http_request_t structure and filling it up with the URI, query string,
+ * request body and other per-request variables.
+ *
+ * Although this function for now only creates loginAttempt requests, it will
+ * be expanded in the future to create other Stormpath API requests as needed.
+ */
+ngx_http_request_t *
+ngx_http_auth_stormpath_make_request(ngx_str_t *href, ngx_str_t uri,
+    ngx_str_t encoded_userpwd, ngx_http_request_t *parent,
+    ngx_http_auth_stormpath_ctx_t *ctx)
+{
+    ngx_http_post_subrequest_t     *ps;
+    ngx_http_request_t             *sr;
+    ngx_buf_t                      *b;
+    ngx_http_upstream_t            *u;
+    ngx_http_auth_stormpath_conf_t *cf;
+
+    cf = ngx_http_get_module_loc_conf(parent, ngx_http_auth_stormpath_module);
+
+    ps = ngx_palloc(parent->pool, sizeof(ngx_http_post_subrequest_t));
     if (ps == NULL) {
-        return NGX_ERROR;
+        return NULL;
     }
 
     ps->handler = ngx_http_auth_stormpath_done;
     ps->data = ctx;
 
-    if (ngx_http_subrequest(r, &cf->app_href, NULL, &sr, ps, 0)
+    if (ngx_http_subrequest(parent, href, NULL, &sr, ps, 0)
         != NGX_OK)
     {
-        return NGX_ERROR;
+        return NULL;
     }
 
     sr->method = NGX_HTTP_POST;
     sr->method_name = strings.http_method_post;
     sr->header_only = 1;
 
-    sr->request_body = ngx_pcalloc(r->pool, sizeof(ngx_http_request_body_t));
+    sr->request_body = ngx_pcalloc(parent->pool,
+        sizeof(ngx_http_request_body_t));
     if (sr->request_body == NULL) {
-        return NGX_ERROR;
+        return NULL;
     }
 
-    b = ngx_calloc_buf(r->pool);
+    b = ngx_calloc_buf(parent->pool);
     if (b == NULL) {
-        return NGX_ERROR;
+        return NULL;
     }
 
-    encoded_userpwd = ngx_http_auth_stormpath_encode_user_pass(sr,
-        r->headers_in.user, r->headers_in.passwd);
-    if (encoded_userpwd.len == 0) {
-        return NGX_ERROR;
-    }
-
-    b->pos = ngx_pcalloc(r->pool, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE);
+    b->pos = ngx_pcalloc(parent->pool, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE);
     b->last = ngx_snprintf(b->pos, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE,
         "{\"type\": \"basic\", \"value\": \"%V\"}", &encoded_userpwd);
 
@@ -451,27 +483,27 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
 
     b->temporary = 1;
 
-    sr->request_body->bufs = ngx_alloc_chain_link(r->pool);
+    sr->request_body->bufs = ngx_alloc_chain_link(parent->pool);
     if (sr->request_body->bufs == NULL) {
-        return NGX_ERROR;
+        return NULL;
     }
 
     sr->request_body->bufs->buf = b;
     sr->request_body->bufs->next = NULL;
     sr->request_body->buf = b;
 
-    sr->header_in = r->header_in;
+    sr->header_in = parent->header_in;
     sr->internal = 1;
-    sr->uri = cf->app_uri;
+    sr->uri = uri;
 
     ctx->subrequest = sr;
 
-    ngx_http_set_ctx(r, ctx, ngx_http_auth_stormpath_module);
+    ngx_http_set_ctx(parent, ctx, ngx_http_auth_stormpath_module);
 
     /* We create the Stormpath API upstream internally instead of asking the
      * user to set it up in the config file. */
     if (ngx_http_upstream_create(sr) != NGX_OK) {
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        return NULL;
     }
 
     u = sr->upstream;
@@ -491,7 +523,7 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
 
     ngx_http_upstream_init(sr);
 
-    return NGX_AGAIN;
+    return sr;
 }
 
 
