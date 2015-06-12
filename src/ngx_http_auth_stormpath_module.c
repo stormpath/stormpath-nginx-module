@@ -11,7 +11,7 @@
 #include <ngx_http.h>
 
 #define NGX_HTTP_AUTH_STORMPATH_BUF_SIZE 8192
-
+#define NGX_HTTP_AUTH_STORMPATH_API_PREFIX "https://api.stormpath.com"
 
 typedef struct {
     ngx_str_t                 app_href;
@@ -206,7 +206,7 @@ ngx_http_auth_stormpath_create_request(ngx_http_request_t *r)
     cl->buf = b;
     r->upstream->request_bufs = cl;
 
-    ngx_snprintf(b->pos, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE - 1,
+    b->last = ngx_snprintf(b->pos, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE - 1,
         "POST %V/loginAttempts HTTP/1.1\r\n"
         "Host: api.stormpath.com\r\n"
         "Content-Type: application/json\r\n"
@@ -219,7 +219,6 @@ ngx_http_auth_stormpath_create_request(ngx_http_request_t *r)
             r->headers_in.content_length_n,
             &cf->apikey);
 
-    b->last = b->pos + ngx_strlen(b->pos);
     cl->next = r->request_body->bufs;
 
     return NGX_OK;
@@ -339,7 +338,6 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
     ngx_http_auth_stormpath_ctx_t  *ctx;
     ngx_http_auth_stormpath_conf_t *cf;
     ngx_buf_t                      *b;
-    u_char                         *auth_data;
     ngx_str_t                       encoded_userpwd;
     ngx_http_upstream_t            *u;
 
@@ -442,15 +440,16 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
         return NGX_ERROR;
     }
 
-    auth_data = ngx_pcalloc(r->pool, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE);
-    ngx_snprintf(auth_data, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE - 1,
+    b->pos = ngx_pcalloc(r->pool, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE);
+    b->last = ngx_snprintf(b->pos, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE,
         "{\"type\": \"basic\", \"value\": \"%V\"}", &encoded_userpwd);
 
-    sr->headers_in.content_length_n = ngx_strlen(auth_data);
+    b->start = b->pos;
+    b->end = b->last;
+
+    sr->headers_in.content_length_n = b->end - b->start;
 
     b->temporary = 1;
-    b->start = b->pos = auth_data;
-    b->end = b->last = auth_data + ngx_strlen(auth_data);
 
     sr->request_body->bufs = ngx_alloc_chain_link(r->pool);
     if (sr->request_body->bufs == NULL) {
@@ -574,14 +573,15 @@ ngx_http_auth_stormpath_init(ngx_conf_t *cf)
 static char *
 ngx_http_auth_stormpath(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
+    u_char  *prefix = (u_char *) NGX_HTTP_AUTH_STORMPATH_API_PREFIX;
+    size_t   prefix_len = sizeof(NGX_HTTP_AUTH_STORMPATH_API_PREFIX) - 1;
+
     ngx_http_auth_stormpath_conf_t *ascf = conf;
     ngx_str_t                      *value;
     ngx_http_upstream_srv_conf_t   *uscf, **uscfp;
     ngx_http_upstream_main_conf_t  *umcf;
     ngx_http_upstream_server_t     *s;
     ngx_url_t                       u;
-    u_char                         *prefix = (u_char *) "https://api.stormpath.com";
-    size_t                          prefix_len;
     ngx_pool_cleanup_t  *cln;
 
     if (ascf->app_href.data != NULL) {
@@ -597,13 +597,12 @@ ngx_http_auth_stormpath(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return NGX_CONF_OK;
     }
 
-    prefix_len = ngx_strlen(prefix);
     if (value[1].len < prefix_len) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
             "invalid application href \"%V\"", &(value[1]));
         return NGX_CONF_ERROR;
     }
-    if (ngx_memcmp(prefix, value[1].data, prefix_len)) {
+    if (ngx_strncmp(prefix, value[1].data, prefix_len)) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
             "invalid application href \"%V\"", &(value[1]));
         return NGX_CONF_ERROR;
