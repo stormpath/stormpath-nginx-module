@@ -469,9 +469,7 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
     ngx_http_set_ctx(r, ctx, ngx_http_auth_stormpath_module);
 
     /* We create the Stormpath API upstream internally instead of asking the
-     * user to set it up in the config file. TODO: check if a single upstream
-     * should be reused across requests or it's fine to create it anew for
-     * each one (the upstream config file *is* reused tho). */
+     * user to set it up in the config file. */
     if (ngx_http_upstream_create(sr) != NGX_OK) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
@@ -566,9 +564,6 @@ ngx_http_auth_stormpath_init(ngx_conf_t *cf)
  * The parser verifies the prefix is correct Stormpath API URL, and then
  * creates an upstream configuration pointing to the Stormpath API, which
  * the subrequests will later use to authenticate against this app.
- *
- * TODO: check if we should only create one upstream for multiple directives,
- * so it's reused/doesn't clash.
  */
 static char *
 ngx_http_auth_stormpath(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
