@@ -25,6 +25,8 @@ typedef struct {
     ngx_uint_t                done;
     ngx_uint_t                status;
     ngx_http_request_t       *subrequest;
+    ngx_str_t                 response;
+    ngx_http_chunked_t        chunked;
 } ngx_http_auth_stormpath_ctx_t;
 
 
@@ -255,19 +257,32 @@ ngx_http_auth_stormpath_process_status_line(ngx_http_request_t *r)
 }
 
 
-/* Second-phase process_header handler for Stormpath API upstream. We're not
- * interested in any headers so we ignore them all, but still go through the
- * motions so the response is properly validated (ie. rejected on an invalid
- * header). */
+/* Second-phase process_header handler for Stormpath API upstream. We're
+ * interested in some headers (chunked encoding, etc.) so we only parse
+ * them, instead of setting up and invoking the built-in nginx parser engine.
+ */
 static ngx_int_t
 ngx_http_auth_stormpath_process_header(ngx_http_request_t *r)
 {
     ngx_int_t rc;
+    ssize_t keylen;
+    u_char *te = (u_char *) "transfer-encoding";
+    ssize_t te_len = ngx_strlen(te);
 
     for ( ;; ) {
         rc = ngx_http_parse_header_line(r, &r->upstream->buffer, 1);
 
         if (rc == NGX_OK) {
+            keylen = r->header_name_end - r->header_name_start;
+
+            if ((keylen == te_len) && !ngx_strncasecmp(r->header_name_start,
+                    te, te_len)) {
+                if (!ngx_strncasecmp(r->header_start,
+                        (u_char *) "chunked", 7)) {
+                    r->upstream->headers_in.chunked = 1;
+                }
+            }
+
             continue;
         }
 
@@ -291,11 +306,18 @@ ngx_http_auth_stormpath_process_header(ngx_http_request_t *r)
 
 /* If the upstream request is to be repeated (ie. connection to the Stormpath
  * API breaks and we want to retry), we need to reset the process_header
- * handler back to the first-phase, the status line parser. */
+ * handler back to the first-phase, the status line parser, and the chunked
+ * encoding body parser. */
 static ngx_int_t
 ngx_http_auth_stormpath_reinit_request(ngx_http_request_t *r)
 {
+    ngx_http_auth_stormpath_ctx_t *ctx;
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_auth_stormpath_module);
+
     r->upstream->process_header = ngx_http_auth_stormpath_process_status_line;
+    ctx->chunked.state = 0;
+
     return NGX_OK;
 }
 
@@ -323,10 +345,55 @@ ngx_http_auth_stormpath_filter_init(void *data)
 }
 
 
+/* Invoked multiple times, as server response content is available. We just
+ * append the data to our internal buffer, reallocating it each time. While
+ * this is less performant than nginx chain-of-buffers, it's easier to do
+ * and we don't expect large responses from our Stormpath API calls.
+ *
+ * If the response transfer-encoding is chunked, we need to decode the body
+ * before appending it to the response buffer.
+ */
 static ngx_int_t
 ngx_http_auth_stormpath_input_filter(void *data, ssize_t bytes)
 {
-    /* nothing to do here, but we still need to provide it */
+    ngx_http_request_t            *r = data;
+    ngx_http_auth_stormpath_ctx_t *ctx;
+    ngx_buf_t                     *b;
+    ngx_int_t                      rc;
+    u_char                        *tmp;
+
+    ctx = ngx_http_get_module_ctx(r->parent, ngx_http_auth_stormpath_module);
+    b = &r->upstream->buffer;
+
+    b->last = b->pos + bytes;
+
+    if (r->upstream->headers_in.chunked) {
+        rc = ngx_http_parse_chunked(r, b, &ctx->chunked);
+
+        if (rc == NGX_AGAIN) {
+            return NGX_OK;
+        }
+        if (rc == NGX_ERROR) {
+            return NGX_ERROR;
+        }
+
+        bytes = ctx->chunked.size;
+        b->last = b->pos + bytes;
+    }
+
+    /* Pretty suboptimal, but we're relying on the fact that at most
+     * a few chunks will arrive from the server, so it's going to be fine.
+     */
+    if (bytes) {
+        tmp = ngx_pnalloc(r->parent->pool, ctx->response.len + bytes);
+        if (ctx->response.len) {
+            (void) ngx_copy(tmp, ctx->response.data, ctx->response.len);
+        }
+        (void) ngx_copy(tmp + ctx->response.len, b->pos, bytes);
+        ctx->response.data = tmp;
+        ctx->response.len += bytes;
+    }
+
     return NGX_OK;
 }
 
@@ -518,11 +585,20 @@ ngx_http_auth_stormpath_make_request(ngx_str_t *href, ngx_str_t uri,
     u->finalize_request = ngx_http_auth_stormpath_finalize_request;
     u->input_filter_init = ngx_http_auth_stormpath_filter_init;
     u->input_filter = ngx_http_auth_stormpath_input_filter;
+    u->input_filter_ctx = sr;
 
     sr->upstream = u;
 
     ngx_http_upstream_init(sr);
 
+    if (ctx->response.data) {
+        ctx->response.data = NULL;
+        ctx->response.len = 0;
+    }
+
+    ctx->chunked.state = 0;
+    ctx->chunked.size = 0;
+    ctx->in_flight = 1;
     return sr;
 }
 
@@ -535,7 +611,7 @@ ngx_http_auth_stormpath_done(ngx_http_request_t *r, void *data, ngx_int_t rc)
 {
     ngx_http_auth_stormpath_ctx_t *ctx = data;
 
-    ctx->done = 1;
+    ctx->in_flight = 0;
     ctx->status = r->headers_out.status;
 
     return rc;
