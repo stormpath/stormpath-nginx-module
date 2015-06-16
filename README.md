@@ -61,12 +61,20 @@ config, add the following two settings:
     auth_stormpath https://api.stormpath.com/v1/applications/YOUR-APP-HREF;
     auth_stormpath_apikey /path/to/your/apiKey.properties;
 
+## Group membership check
+
+In addition to authentication against an application, you can also require
+the authenticated account to be a member of a particular group. To configure
+this, use the `auth_stormpath_require_group` directive:
+
+    auth_stormpath_require_group https://api.stormpath.com/v1/groups/YOUR-GROUP-HREF;
+
 ## Known issues
 
 This is far, far away from complete module, it's more like a prototype to test
 the waters. Biggest known problems with the module as is:
 
-* doesn't cache loginAttempt responses, so Stormpath API call will be made for
+* doesn't cache Stormpath API responses, so an API call will be made for
   *every* request made for the location
 * reinvents HTTP request creation and parsing, and Java .properties file parsing,
   probably containing nasty bugs in related portions of code
