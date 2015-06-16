@@ -17,12 +17,15 @@ typedef struct {
     ngx_str_t                 app_href;
     ngx_str_t                 app_uri;
     ngx_str_t                 apikey;
+    ngx_str_t                 group_href;
+    ngx_str_t                 group_uri;
     ngx_http_upstream_conf_t  upstream;
 } ngx_http_auth_stormpath_conf_t;
 
 
 typedef struct {
-    ngx_uint_t                done;
+    ngx_uint_t                in_flight;
+    ngx_uint_t                authenticated;
     ngx_uint_t                status;
     ngx_http_request_t       *subrequest;
     ngx_str_t                 response;
@@ -46,8 +49,13 @@ static ngx_int_t ngx_http_auth_stormpath_set_realm(ngx_http_request_t *r,
 static ngx_str_t ngx_http_auth_stormpath_encode_user_pass(
     ngx_http_request_t *r, ngx_str_t user, ngx_str_t pass);
 ngx_http_request_t *ngx_http_auth_stormpath_make_request(ngx_str_t *href,
-    ngx_str_t uri, ngx_str_t encoded_userpwd,
+    ngx_uint_t method, ngx_str_t uri, ngx_str_t encoded_userpwd,
     ngx_http_request_t *parent, ngx_http_auth_stormpath_ctx_t *ctx);
+ngx_str_t ngx_http_auth_stormpath_build_login_attempt_uri(
+    ngx_http_request_t *r, ngx_str_t app_uri);
+ngx_str_t ngx_http_auth_stormpath_build_group_accounts_uri(
+    ngx_http_request_t *r, ngx_str_t group_uri, ngx_str_t username);
+
 static ngx_int_t ngx_http_auth_stormpath_handler(ngx_http_request_t *r);
 
 static ngx_int_t ngx_http_auth_stormpath_create_request(ngx_http_request_t *r);
@@ -70,6 +78,8 @@ static char *ngx_http_auth_stormpath_merge_conf(ngx_conf_t *cf,
 static ngx_int_t ngx_http_auth_stormpath_init(ngx_conf_t *cf);
 static char *ngx_http_auth_stormpath(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static char * ngx_http_auth_stormpath_require_group(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
 static char *ngx_http_auth_stormpath_apikey(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 
@@ -81,6 +91,13 @@ static ngx_command_t  ngx_http_auth_stormpath_commands[] = {
       ngx_http_auth_stormpath,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_auth_stormpath_conf_t, app_href),
+      NULL },
+
+    { ngx_string("auth_stormpath_require_group"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_http_auth_stormpath_require_group,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_auth_stormpath_conf_t, group_href),
       NULL },
 
     { ngx_string("auth_stormpath_apikey"),
@@ -166,7 +183,8 @@ static ngx_str_t
 ngx_http_auth_stormpath_encode_user_pass(ngx_http_request_t *r,
     ngx_str_t user, ngx_str_t pass)
 {
-    ngx_str_t txt, enc, err = ngx_null_string;
+    ngx_str_t txt, enc, body, err = ngx_null_string;
+    u_char *p;
 
     txt.len = user.len + 1 + pass.len;
     txt.data = ngx_pnalloc(r->pool, txt.len);
@@ -182,7 +200,14 @@ ngx_http_auth_stormpath_encode_user_pass(ngx_http_request_t *r,
     }
 
     ngx_encode_base64(&enc, &txt);
-    return enc;
+
+    body.data = ngx_pnalloc(r->pool, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE);
+    p = ngx_snprintf(body.data, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE,
+        "{\"type\": \"basic\", \"value\": \"%V\"}", &enc);
+
+    body.len = p - body.data;
+
+    return body;
 }
 
 
@@ -196,6 +221,7 @@ ngx_http_auth_stormpath_create_request(ngx_http_request_t *r)
     ngx_buf_t                      *b;
     ngx_chain_t                    *cl;
     ngx_http_auth_stormpath_conf_t *cf;
+    u_char                         *method_name = NULL;
 
     cf = ngx_http_get_module_loc_conf(r->parent,
         ngx_http_auth_stormpath_module);
@@ -211,8 +237,19 @@ ngx_http_auth_stormpath_create_request(ngx_http_request_t *r)
     cl->buf = b;
     r->upstream->request_bufs = cl;
 
+    switch (r->method) {
+        case NGX_HTTP_GET:
+            method_name = (u_char *) "GET";
+            break;
+        case NGX_HTTP_POST:
+            method_name = (u_char *) "POST";
+            break;
+        default:
+            return NGX_ERROR;
+    }
+
     b->last = ngx_snprintf(b->pos, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE - 1,
-        "POST %V/loginAttempts HTTP/1.1\r\n"
+        "%s %V HTTP/1.1\r\n"
         "Host: api.stormpath.com\r\n"
         "Content-Type: application/json\r\n"
         "Accept: application/json\r\n"
@@ -220,11 +257,13 @@ ngx_http_auth_stormpath_create_request(ngx_http_request_t *r)
         "Authorization: Basic %V\r\n"
         "Connection: close\r\n"
         "User-Agent: stormpath-nginx/alpha (" NGINX_VER ")\r\n\r\n",
-            &r->uri,
+            method_name, &r->uri,
             r->headers_in.content_length_n,
             &cf->apikey);
 
-    cl->next = r->request_body->bufs;
+    if (r->method == NGX_HTTP_POST) {
+        cl->next = r->request_body->bufs;
+    }
 
     return NGX_OK;
 }
@@ -406,7 +445,7 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
     ngx_http_request_t             *sr;
     ngx_http_auth_stormpath_ctx_t  *ctx;
     ngx_http_auth_stormpath_conf_t *cf;
-    ngx_str_t                       encoded_userpwd;
+    ngx_str_t                       uri, body, str_null = ngx_null_string;
 
     cf = ngx_http_get_module_loc_conf(r, ngx_http_auth_stormpath_module);
 
@@ -435,14 +474,19 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
             return NGX_ERROR;
         }
 
-        encoded_userpwd = ngx_http_auth_stormpath_encode_user_pass(r,
+        body = ngx_http_auth_stormpath_encode_user_pass(r,
             r->headers_in.user, r->headers_in.passwd);
-        if (encoded_userpwd.len == 0) {
+        if (body.len == 0) {
             return NGX_ERROR;
         }
 
-        sr = ngx_http_auth_stormpath_make_request(&cf->app_href, cf->app_uri,
-            encoded_userpwd, r, ctx);
+        uri = ngx_http_auth_stormpath_build_login_attempt_uri(r, cf->app_uri);
+        if (uri.len == 0) {
+            return NGX_ERROR;
+        }
+
+        sr = ngx_http_auth_stormpath_make_request(&cf->app_href,
+            NGX_HTTP_POST, uri, body, r, ctx);
         if (sr == NULL) {
             return NGX_ERROR;
         }
@@ -451,55 +495,153 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
     }
 
     /* If the sub request is still in-flight, ask nginx to invoke us later. */
-    if (!ctx->done) {
+    if (ctx->in_flight) {
         return NGX_AGAIN;
     }
 
-    /* Subrequest returned 200 OK, which means we're fine and allow the
-     * location access. */
-    if (ctx->status == NGX_HTTP_OK)
-    {
-        return NGX_OK;
+    if (!ctx->authenticated) {
+        /* Subrequest returned 401, meaning our Stormpath API credentials are
+         * incorrect, which is a server error (not the client's fault). */
+        if (ctx->status == NGX_HTTP_UNAUTHORIZED) {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "invalid Stormpath API credentials");
+
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        /* Subrequest returned 400, meaning the login attempt failed. We set
+         * HTTP basic authentication challenge header and we're done here. */
+        if (ctx->status == NGX_HTTP_BAD_REQUEST) {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "Stormpath login attempt failed");
+
+            return ngx_http_auth_stormpath_set_realm(r,
+                &strings.realm_stormpath);
+        }
+
+        /* Something unexpected happened, the safest choice is to treat it as
+         * server error. */
+        if (ctx->status != NGX_HTTP_OK) {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "auth stormpath unexpected status: %d", ctx->status);
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        /* Subrequest returned 200 OK, which means the client has successfully
+         * authenticated. If there's no need to check for group membership,
+         * we're done here. */
+
+        ctx->authenticated = 1;
+
+        if (cf->group_href.len == 0) {
+            return NGX_OK;
+        }
+
+        /* We need to make another Stormpath API Request to check for group
+         * membership. */
+
+        uri = ngx_http_auth_stormpath_build_group_accounts_uri(r,
+            cf->group_uri, r->headers_in.user);
+        if (uri.len == 0) {
+            return NGX_ERROR;
+        }
+
+        sr = ngx_http_auth_stormpath_make_request(&cf->group_href,
+            NGX_HTTP_GET, uri, str_null, r, ctx);
+        if (sr == NULL) {
+            return NGX_ERROR;
+        }
+
+        return NGX_AGAIN;
     }
 
-    /* Subrequest returned 401, meaning our Stormpath API credentials are
-     * incorrect, which is a server error (not the client's fault). */
-    if (ctx->status == NGX_HTTP_UNAUTHORIZED) {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-                      "invalid Stormpath API credentials");
+    /* Client has been authenticated and group membership check request has
+     * also finished. */
 
+    if (ctx->status != NGX_HTTP_OK) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "auth stormpath group check unexpected status: %d",
+                      ctx->status);
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    /* Subrequest returned 400, meaning the login attempt failed. We set
-     * HTTP basic authentication challenge header and we're done here. */
-    if (ctx->status == NGX_HTTP_BAD_REQUEST) {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-                      "Stormpath login attempt failed");
-
-        return ngx_http_auth_stormpath_set_realm(r, &strings.realm_stormpath);
+    /* Check that the account href is in the response body. Since there can
+     * only be at most one matching account, we cheat here and just check
+     * that the number of the items in the response is equal to one, assuming
+     * that the json encoding strips all unneccessary space between tokens.
+     *
+     * FIXME: Should use https://github.com/udp/json-parser
+     */
+    if (ngx_strnstr(ctx->response.data, "\"size\":1", ctx->response.len)) {
+        return NGX_OK;
     }
 
-    /* Something unexpected happened, the safest choice is to treat it as
-     * server error. */
-    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-                  "auth stormpath unexpected status: %d", ctx->status);
-
-    return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    /* Group check was made and account wasn't in it, deny auth. */
+    return ngx_http_auth_stormpath_set_realm(r, &strings.realm_stormpath);
 }
+
+
+/* Build a URI for login attempt against a Stormpath application. */
+ngx_str_t
+ngx_http_auth_stormpath_build_login_attempt_uri(ngx_http_request_t *r,
+    ngx_str_t app_uri)
+{
+    ngx_str_t uri, err = ngx_null_string;
+
+    uri.len = app_uri.len + sizeof("/loginAttempts") - 1;
+    uri.data = ngx_pnalloc(r->pool, uri.len);
+    if (uri.data == NULL) {
+        return err;
+    }
+
+    ngx_snprintf(uri.data, uri.len, "%V/loginAttempts", &app_uri);
+    return uri;
+}
+
+
+/* Build a URI for checking whether account is in the group. The check is
+ * made by doing a filter on the group accounts collection resource, filtering
+ * by username. We cheat here and append the query string directly in the
+ * URI instead of putting it in the request args, but we know we can do that
+ * because we're outputting the request manually later via
+ * http_auth_stormpath_create_request anyways. */
+ngx_str_t
+ngx_http_auth_stormpath_build_group_accounts_uri(ngx_http_request_t *r,
+    ngx_str_t group_uri, ngx_str_t username)
+{
+    ngx_str_t uri, eusr, err = ngx_null_string;
+    u_char *p;
+
+    eusr.data = ngx_pnalloc(r->pool, username.len * 3);
+    if (eusr.data == NULL) {
+        return err;
+    }
+
+    p = (u_char *) ngx_escape_uri(eusr.data, username.data, username.len, 0);
+    eusr.len = p - eusr.data;
+
+    uri.len = group_uri.len + sizeof("/accounts?username=") - 1 + eusr.len;
+    uri.data = ngx_pnalloc(r->pool, uri.len);
+    if (uri.data == NULL) {
+        return err;
+    }
+
+    ngx_snprintf(uri.data, uri.len, "%V/accounts?username=%V",
+        &group_uri, &eusr);
+
+    return uri;
+}
+
 
 /* Build and issue the request to the Stormpath API. In contrast to
  * http_auth_stormpath_create_request, which takes care of speaking with the
  * upstream, this function takes care of actually setting up the
- * ngx_http_request_t structure and filling it up with the URI, query string,
+ * ngx_http_request_t structure and filling it up with the URI,
  * request body and other per-request variables.
- *
- * Although this function for now only creates loginAttempt requests, it will
- * be expanded in the future to create other Stormpath API requests as needed.
  */
 ngx_http_request_t *
-ngx_http_auth_stormpath_make_request(ngx_str_t *href, ngx_str_t uri,
-    ngx_str_t encoded_userpwd, ngx_http_request_t *parent,
+ngx_http_auth_stormpath_make_request(ngx_str_t *href, ngx_uint_t method,
+    ngx_str_t uri, ngx_str_t body, ngx_http_request_t *parent,
     ngx_http_auth_stormpath_ctx_t *ctx)
 {
     ngx_http_post_subrequest_t     *ps;
@@ -524,9 +666,8 @@ ngx_http_auth_stormpath_make_request(ngx_str_t *href, ngx_str_t uri,
         return NULL;
     }
 
-    sr->method = NGX_HTTP_POST;
-    sr->method_name = strings.http_method_post;
-    sr->header_only = 1;
+    sr->method = method;
+    sr->header_only = 0;
 
     sr->request_body = ngx_pcalloc(parent->pool,
         sizeof(ngx_http_request_body_t));
@@ -539,14 +680,10 @@ ngx_http_auth_stormpath_make_request(ngx_str_t *href, ngx_str_t uri,
         return NULL;
     }
 
-    b->pos = ngx_pcalloc(parent->pool, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE);
-    b->last = ngx_snprintf(b->pos, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE,
-        "{\"type\": \"basic\", \"value\": \"%V\"}", &encoded_userpwd);
+    b->start = b->pos = body.data;
+    b->end = b->last = body.data + body.len;
 
-    b->start = b->pos;
-    b->end = b->last;
-
-    sr->headers_in.content_length_n = b->end - b->start;
+    sr->headers_in.content_length_n = body.len;
 
     b->temporary = 1;
 
@@ -802,6 +939,54 @@ ngx_http_auth_stormpath(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     return NGX_CONF_OK;
 
+}
+
+
+/* Parse 'auth_stormpath_require_group' directive in the config file.
+ * The directive takes one parameter, a full href of the group to check
+ * for membership.
+ */
+static char *
+ngx_http_auth_stormpath_require_group(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf)
+{
+    u_char  *prefix = (u_char *) NGX_HTTP_AUTH_STORMPATH_API_PREFIX;
+    size_t   prefix_len = sizeof(NGX_HTTP_AUTH_STORMPATH_API_PREFIX) - 1;
+
+    ngx_http_auth_stormpath_conf_t *ascf = conf;
+    ngx_str_t                      *value;
+
+    if (ascf->group_href.data != NULL) {
+        return "is duplicate";
+    }
+
+    value = cf->args->elts;
+
+    if (ngx_strcmp(value[1].data, "off") == 0) {
+        ascf->group_href.len = 0;
+        ascf->group_href.data = (u_char *) "";
+
+        return NGX_CONF_OK;
+    }
+
+    if (value[1].len < prefix_len) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "invalid group href \"%V\"", &(value[1]));
+        return NGX_CONF_ERROR;
+    }
+    if (ngx_strncmp(prefix, value[1].data, prefix_len)) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "invalid group href \"%V\"", &(value[1]));
+        return NGX_CONF_ERROR;
+    }
+
+    ascf->group_href = value[1];
+    ascf->group_uri.len = ascf->group_href.len - prefix_len;
+    ascf->group_uri.data = ngx_pcalloc(cf->pool, ascf->group_uri.len);
+    (void) ngx_copy(ascf->group_uri.data, ascf->group_href.data + prefix_len,
+        ascf->group_uri.len);
+
+    return NGX_CONF_OK;
 }
 
 
