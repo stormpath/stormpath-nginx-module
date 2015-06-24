@@ -87,4 +87,4 @@ This project is open-source via the [Apache 2.0 License](http://www.apache.org/l
 
 This project is heavily based upon the nginx source code, &copy; Nginx, Inc.
 
-For all additional information, please see the full [Project Documentation](http://docs.stormpath.com/rest/product-guide/).
+This project contains full copy of [json-parser](https://github.com/udp/json-parser/tree/c967d4d86788c50352e8ea4d67c64808a49c6650). &copy; 2012, 2013 James McLaughlin et al.

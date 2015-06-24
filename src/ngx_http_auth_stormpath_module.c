@@ -10,6 +10,8 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
+#include "json.h"
+
 #define NGX_HTTP_AUTH_STORMPATH_BUF_SIZE 8192
 #define NGX_HTTP_AUTH_STORMPATH_API_PREFIX "https://api.stormpath.com"
 
