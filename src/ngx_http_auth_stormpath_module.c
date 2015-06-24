@@ -47,6 +47,7 @@ static struct {
 };
 
 
+/* Various helpers */
 static ngx_int_t ngx_http_auth_stormpath_set_realm(ngx_http_request_t *r,
     ngx_str_t *realm);
 static ngx_str_t ngx_http_auth_stormpath_encode_user_pass(
@@ -59,8 +60,12 @@ ngx_str_t ngx_http_auth_stormpath_build_login_attempt_uri(
 ngx_str_t ngx_http_auth_stormpath_build_group_accounts_uri(
     ngx_http_request_t *r, ngx_str_t group_uri, ngx_str_t username);
 
+/* Request handler */
 static ngx_int_t ngx_http_auth_stormpath_handler(ngx_http_request_t *r);
+static ngx_int_t ngx_http_auth_stormpath_done(ngx_http_request_t *r,
+    void *data, ngx_int_t rc);
 
+/* Upstream handler */
 static ngx_int_t ngx_http_auth_stormpath_create_request(ngx_http_request_t *r);
 static ngx_int_t ngx_http_auth_stormpath_process_status_line(
     ngx_http_request_t *r);
@@ -73,8 +78,7 @@ static ngx_int_t ngx_http_auth_stormpath_filter_init(void *data);
 static ngx_int_t ngx_http_auth_stormpath_input_filter(void *data,
     ssize_t bytes);
 
-static ngx_int_t ngx_http_auth_stormpath_done(ngx_http_request_t *r,
-    void *data, ngx_int_t rc);
+/* NGINX configuration parsing and module setup */
 static void *ngx_http_auth_stormpath_create_conf(ngx_conf_t *cf);
 static char *ngx_http_auth_stormpath_merge_conf(ngx_conf_t *cf,
     void *parent, void *child);
@@ -902,8 +906,8 @@ ngx_http_auth_stormpath_make_request(ngx_str_t *href, ngx_uint_t method,
 
 
 /* When the subrequest is done, we mark it as such and pluck out the response
- * status from the response. For now that's all we need to figure out the
- * status of the login attempt. */
+ * status from the response. The request handler will check for the response
+ * validity and meaning later. */
 static ngx_int_t
 ngx_http_auth_stormpath_done(ngx_http_request_t *r, void *data, ngx_int_t rc)
 {
