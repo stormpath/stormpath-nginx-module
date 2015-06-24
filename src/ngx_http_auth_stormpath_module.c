@@ -32,6 +32,7 @@ typedef struct {
     ngx_http_request_t       *subrequest;
     ngx_str_t                 response;
     ngx_http_chunked_t        chunked;
+    ngx_str_t                 account_href;
 } ngx_http_auth_stormpath_ctx_t;
 
 
@@ -84,6 +85,17 @@ static char * ngx_http_auth_stormpath_require_group(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *ngx_http_auth_stormpath_apikey(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
+
+/* JSON response parsing */
+static void *ngx_json_mem_alloc(size_t size, int zero, void *user_data);
+static void ngx_json_mem_free(void *ptr, void *user_data);
+static void ngx_sp_json_init_parser_settings(json_settings *js,
+    ngx_pool_t *pool);
+static json_value *ngx_sp_json_get_property(json_value *v, char *name);
+static ngx_str_t ngx_sp_parse_login_attempt_response(ngx_http_request_t *r,
+    ngx_str_t resp);
+static ngx_int_t ngx_sp_parse_group_accounts_response(ngx_http_request_t *r,
+    ngx_str_t resp, ngx_str_t account_href);
 
 
 static ngx_command_t  ngx_http_auth_stormpath_commands[] = {
@@ -439,6 +451,150 @@ ngx_http_auth_stormpath_input_filter(void *data, ssize_t bytes)
 }
 
 
+/* Glue between nginx memory allocators and JSON parser library. */
+static void *
+ngx_json_mem_alloc(size_t size, int zero, void *user_data)
+{
+    ngx_pool_t *pool = (ngx_pool_t *) user_data;
+    return zero ? ngx_pcalloc(pool, size) : ngx_pnalloc(pool, size);
+}
+
+
+/* Glue between nginx memory allocators and JSON parser library. */
+static void
+ngx_json_mem_free(void *ptr, void *user_data)
+{
+    ngx_pool_t *pool = (ngx_pool_t *) user_data;
+    ngx_pfree(pool, ptr);
+}
+
+
+/* Initialize the JSON parser library settings so it know how to do
+ * memory allocation/freeing. */
+static void
+ngx_sp_json_init_parser_settings(json_settings *js, ngx_pool_t *pool) {
+    js->mem_alloc = ngx_json_mem_alloc;
+    js->mem_free = ngx_json_mem_free;
+    js->user_data = pool;
+    js->max_memory = 1048576; // 1MB should be enough for everyone
+    js->value_extra = 0;
+}
+
+
+/* Helper for getting property out of a JSON object, with guards so it can be
+ * easily used recursively without checking for errors in each step. */
+static json_value *
+ngx_sp_json_get_property(json_value *v, char *name)
+{
+    ssize_t name_len = ngx_strlen(name);
+    unsigned int i;
+
+    if (!v || v->type != json_object)
+        return NULL;
+
+    for (i = 0; i < v->u.object.length; i++) {
+        if (name_len != v->u.object.values[i].name_length) continue;
+        if (ngx_strncmp(name, v->u.object.values[i].name, name_len)) continue;
+        return v->u.object.values[i].value;
+    }
+    return NULL;
+}
+
+
+/* Parse loginAttempt response and try to pluck the account href from the
+ * result. Returns the account href as a nginx string or null string if
+ * parse failed. */
+static ngx_str_t
+ngx_sp_parse_login_attempt_response(ngx_http_request_t *r, ngx_str_t resp)
+{
+    ngx_str_t href, err = ngx_null_string;
+    json_settings js;
+    json_value *jv, *v;
+    char json_err[NGX_HTTP_AUTH_STORMPATH_BUF_SIZE];
+
+    if (!resp.len) return err;
+
+    ngx_sp_json_init_parser_settings(&js, r->pool);
+    jv = json_parse_ex(&js, (char *) resp.data, resp.len, json_err);
+    if (jv == NULL) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+            "error parsing upstream JSON response: %s", json_err);
+        return err;
+    }
+
+    v = ngx_sp_json_get_property(jv, "account");
+    v = ngx_sp_json_get_property(v, "href");
+
+    if (!v || v->type != json_string || !v->u.string.length) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+            "upstream sent invalid response: %V", &resp);
+        return err;
+    }
+
+    href.len = v->u.string.length;
+    href.data = ngx_pnalloc(r->pool, href.len);
+    (void) ngx_copy(href.data, v->u.string.ptr, href.len);
+
+    json_value_free_ex(&js, jv);
+    return href;
+}
+
+/* Parse group accounts response and check if provided account href is in
+ * the group. Returns NGX_OK if account is found, NGX_ERROR if not or if
+ * there was an error parsing the response.
+ */
+static ngx_int_t
+ngx_sp_parse_group_accounts_response(ngx_http_request_t *r, ngx_str_t resp,
+    ngx_str_t account_href)
+{
+    json_settings js;
+    json_value *jv, *v, *el, *prop;
+    unsigned int i;
+    char json_err[NGX_HTTP_AUTH_STORMPATH_BUF_SIZE];
+
+    if (!resp.len) return NGX_ERROR;
+
+    ngx_sp_json_init_parser_settings(&js, r->pool);
+    jv = json_parse_ex(&js, (char *) resp.data, resp.len, json_err);
+    if (jv == NULL) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+            "error parsing upstream JSON response: %s", json_err);
+        return NGX_ERROR;
+    }
+
+    v = ngx_sp_json_get_property(jv, "items");
+    if (!v || v->type != json_array) {
+        goto invalid_response;
+    }
+
+    for (i = 0; i < v->u.array.length; i++) {
+        el = v->u.array.values[i];
+        if (!el || el->type != json_object) {
+            goto invalid_response;
+        }
+        prop = ngx_sp_json_get_property(el, "href");
+        if (!prop || prop->type != json_string) continue;
+        if (prop->u.string.length != account_href.len) continue;
+        if (ngx_strncmp(prop->u.string.ptr, account_href.data, account_href.len))
+            continue;
+
+        json_value_free_ex(&js, jv);
+        return NGX_OK;
+    }
+
+    /* specified account not found in group response */
+    json_value_free_ex(&js, jv);
+    return NGX_ERROR;
+
+invalid_response:
+    json_value_free_ex(&js, jv);
+
+    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+        "upstream sent invalid response: %V", &resp);
+    return NGX_ERROR;
+}
+
+
 /* Handler to be executed when request wants a location with stormpath_auth.
  */
 static ngx_int_t
@@ -530,11 +686,18 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
         }
 
         /* Subrequest returned 200 OK, which means the client has successfully
-         * authenticated. If there's no need to check for group membership,
-         * we're done here. */
+         * authenticated. Now we just need to get the account href from the
+         * response. */
 
         ctx->authenticated = 1;
 
+        ctx->account_href = ngx_sp_parse_login_attempt_response(r,
+            ctx->response);
+        if (!ctx->account_href.len) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        /* If there's no need to check for group membership, we're done. */
         if (cf->group_href.len == 0) {
             return NGX_OK;
         }
@@ -567,14 +730,9 @@ ngx_http_auth_stormpath_handler(ngx_http_request_t *r)
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    /* Check that the account href is in the response body. Since there can
-     * only be at most one matching account, we cheat here and just check
-     * that the number of the items in the response is equal to one, assuming
-     * that the json encoding strips all unneccessary space between tokens.
-     *
-     * FIXME: Should use https://github.com/udp/json-parser
-     */
-    if (ngx_strnstr(ctx->response.data, "\"size\":1", ctx->response.len)) {
+    /* Check that our authenticated account's href is in the group. */
+    if (ngx_sp_parse_group_accounts_response(r, ctx->response,
+            ctx->account_href) == NGX_OK) {
         return NGX_OK;
     }
 
