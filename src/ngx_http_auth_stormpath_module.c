@@ -477,11 +477,11 @@ ngx_json_mem_free(void *ptr, void *user_data)
  * memory allocation/freeing. */
 static void
 ngx_sp_json_init_parser_settings(json_settings *js, ngx_pool_t *pool) {
+    ngx_memzero(js, sizeof(json_settings));
     js->mem_alloc = ngx_json_mem_alloc;
     js->mem_free = ngx_json_mem_free;
     js->user_data = pool;
     js->max_memory = 1048576; // 1MB should be enough for everyone
-    js->value_extra = 0;
 }
 
 
@@ -1287,10 +1287,12 @@ ngx_http_auth_stormpath_apikey(ngx_conf_t *cf, ngx_command_t *cmd,
     file.fd = fd;
     file.name = value[1];
 
-    n = ngx_read_file(&file, buf, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE, 0);
+    n = ngx_read_file(&file, buf, NGX_HTTP_AUTH_STORMPATH_BUF_SIZE - 1, 0);
     if (n == NGX_ERROR) {
         ngx_close_file(fd);
+        return "Error reading API properties file";
     }
+    buf[n] = '\0';
 
     parse_apikey_file(cf, buf, &id, &secret);
 
