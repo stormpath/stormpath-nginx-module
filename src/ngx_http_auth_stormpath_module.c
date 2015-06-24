@@ -889,6 +889,7 @@ ngx_http_auth_stormpath_make_request(ngx_str_t *href, ngx_uint_t method,
     ngx_http_upstream_init(sr);
 
     if (ctx->response.data) {
+        ngx_pfree(parent->pool, ctx->response.data);
         ctx->response.data = NULL;
         ctx->response.len = 0;
     }
