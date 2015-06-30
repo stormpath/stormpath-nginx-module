@@ -77,12 +77,12 @@ working properly. To run the tests, you'll need a set of Stormpath credentials
 application, a group and a couple of users used in the test.
 
 Test runner depends on Stormpath Python SDK (available as package `stormpath`
-from Python Package Index), `curl` command-line tool, and all the
-build-dependencies of Nginx itself. On Debian/Ubuntu system, these can be
-installed with:
+from Python Package Index), `curl` command-line tool, Valgrind (for
+memory debugging), and all the build-dependencies of Nginx itself. On
+Debian/Ubuntu system, these can be installed with:
 
     apt-get build-dep nginx
-    apt-get install python-pip curl
+    apt-get install python-pip curl valgrind
     pip install stormpath
 
 To run the test, first make sure your Stormpath test credentials are available
