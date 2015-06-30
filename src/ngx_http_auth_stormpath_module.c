@@ -1271,6 +1271,7 @@ ngx_http_auth_stormpath_apikey(ngx_conf_t *cf, ngx_command_t *cmd,
     u_char                          buf[NGX_HTTP_AUTH_STORMPATH_BUF_SIZE];
     ssize_t                         n;
     ngx_str_t                       id, secret;
+    char                           *err;
 
     if (ascf->apikey.data != NULL) {
         return "is duplicate";
@@ -1294,7 +1295,10 @@ ngx_http_auth_stormpath_apikey(ngx_conf_t *cf, ngx_command_t *cmd,
     }
     buf[n] = '\0';
 
-    parse_apikey_file(cf, buf, &id, &secret);
+    err = parse_apikey_file(cf, buf, &id, &secret);
+    if (err != NGX_CONF_OK) {
+        return err;
+    }
 
     ascf->apikey = ngx_http_auth_stormpath_encode_conf_id_secret(cf,
         id, secret);
