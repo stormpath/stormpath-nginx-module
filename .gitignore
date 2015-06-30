@@ -1,0 +1,5 @@
+/test/conf/apikey.properties
+/test/conf/nginx.conf
+/test/logs/*.log
+/test/nginx
+/test/nginx-*

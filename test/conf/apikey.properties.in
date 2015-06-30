@@ -1,0 +1,2 @@
+apiKey.id = %(STORMPATH_API_KEY_ID)s
+apiKey.secret = %(STORMPATH_API_KEY_SECRET)s

@@ -1,0 +1,40 @@
+worker_processes 1;
+daemon off;
+master_process off;
+error_log stderr debug;
+
+events {
+}
+
+http {
+    server {
+        listen       8000;
+        server_name  localhost;
+        root   html;
+        index  index.html;
+
+        location / {
+        }
+
+        location /test-invalid-credentials/ {
+            auth_stormpath https://api.stormpath.com/v1/applications/nonexistentStubAppHref;
+            auth_stormpath_apikey conf/bogus.properties;
+        }
+
+        location /test-nonexistent-application/ {
+            auth_stormpath https://api.stormpath.com/v1/applications/nonexistentStubAppHref;
+            auth_stormpath_apikey conf/apikey.properties;
+        }
+
+        location /test-auth/ {
+            auth_stormpath %(app_href)s;
+            auth_stormpath_apikey conf/apikey.properties;
+        }
+
+        location /test-group/ {
+            auth_stormpath %(app_href)s;
+            auth_stormpath_apikey conf/apikey.properties;
+            auth_stormpath_require_group %(group_href)s;
+        }
+    }
+}

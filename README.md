@@ -69,6 +69,40 @@ this, use the `auth_stormpath_require_group` directive:
 
     auth_stormpath_require_group https://api.stormpath.com/v1/groups/YOUR-GROUP-HREF;
 
+## Testing
+
+The module comes with a small suite of tests to verify it's building and
+working properly. To run the tests, you'll need a set of Stormpath credentials
+(don't use the ones you use for production!). The test will create `nginxtest`
+application, a group and a couple of users used in the test.
+
+Test runner depends on Stormpath Python SDK (available as package `stormpath`
+from Python Package Index), `curl` command-line tool, and all the
+build-dependencies of Nginx itself. On Debian/Ubuntu system, these can be
+installed with:
+
+    apt-get build-dep nginx
+    apt-get install python-pip curl
+    pip install stormpath
+
+To run the test, first make sure your Stormpath test credentials are available
+in the environment:
+
+    export STORMPATH_API_KEY_ID=<your-test-api-key-id>
+    export STORMPATH_API_KEY_SECRET=<your-test-api-key-secret>
+
+Additionally, set the `VERBOSE` environment variable to `1` to see the verbose
+test output (each line of each test as it executes):
+
+    export VERBOSE=1
+
+Then, run the tests with:
+
+    make test
+
+Note that during the test, nginx will temporarily listen on port 8000 for
+incoming connections.
+
 ## Known issues
 
 This is far, far away from complete module, it's more like a prototype to test
