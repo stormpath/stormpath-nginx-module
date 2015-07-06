@@ -98,6 +98,7 @@ test output (each line of each test as it executes):
 
 Then, run the tests with:
 
+    cd test
     make test
 
 Note that during the test, nginx will temporarily listen on port 8000 for
