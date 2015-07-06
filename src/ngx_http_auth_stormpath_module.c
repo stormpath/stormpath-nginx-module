@@ -436,6 +436,9 @@ ngx_http_auth_stormpath_input_filter(void *data, ssize_t bytes)
 
         bytes = ctx->chunked.size;
         b->last = b->pos + bytes;
+
+        ctx->chunked.size = 0;
+        ctx->chunked.state = 0;
     }
 
     /* Pretty suboptimal, but we're relying on the fact that at most
