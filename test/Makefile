@@ -4,9 +4,9 @@
 all: test
 
 testdeps:
-    sudo apt-get build-dep nginx
-    sudo apt-get install python-pip curl valgrind
-    sudo pip install stormpath
+	sudo apt-get build-dep nginx
+	sudo apt-get install python-pip curl valgrind
+	sudo pip install stormpath
 
 nginx-1.9.2/objs/ngx_auto_config.h:
 	curl -s http://nginx.org/download/nginx-1.9.2.tar.gz -o nginx-1.9.2.tar.gz
