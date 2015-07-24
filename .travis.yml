@@ -1,7 +1,22 @@
 language: c
-sudo: required
+addons:
+    apt:
+        packages:
+            - python-pip
+            - curl
+            - valgrind
+            - autotools-dev
+            - libexpat-dev
+            - libmhash-dev
+            - libpcre3-dev
+            - libperl-dev
+            - libssl-dev
+            - libxslt1-dev
+            - zlib1g-dev
 install:
-    - make -C test testdeps
+    - pip install stormpath
+script:
+    - make -C test
 env:
   global:
     - secure: Jk9gNRxQH3l0o99aEECDYuV10pTJnBprXWOVAQXSBB+6O1zxV5uy1V57G+byzHlSI4m61A1eoVYZInMpjplVWXs8AiQ0MEFWZkI1+Ca5q4RCxpo4/GLNBp0dc0armVrggoJ7nhCVLHn1eRhFOceuN9F4Z6hvi/h9b1uszX9q6ywVHcaDI4rMA5kZSwvpYXX9x6C9fQe4kUlAh8bP3xkmKqWh+Ht31Nt31Qs2M+vO0H7d3pZtdwWc0DExxES1MWdoMzwrai2cDf3vmzUO8xKeWJQlwIAfNrwD38UjaraDpXCog9Zhj0ggexV7N/kJM+XOb6sr8Tpy5JLOxfqR9g6h8UVGLUeEVJsgtRUf0qHp3p3n03XjkOcrURNASF643VjUSVkF8X3ocFvzyd3t4hd9zsgc8WQlMh/itaBanPBz03+fo71esGiUfvw4KsKREks0VOK3Q/RcraII5sOhz77lNrE1mr0vBDOBSWN8bD7xz4jrwKXyI88x7oqCCOcV+1PGTDEphW8f7+iQqliXifaE/f2XVS6bGNIFVhV9kM8JnsMTN6tQ2QmcbmRUOY9PHw5ncjfOXijmc0SDsy3DuCDHDmea1TsIDbRpzbfc5QVUfddh6le3T3Nss9Agr7ziPro3orTLCzezw/ecR/HMRaCU8HjKyE78pk9fmGvMNvnFj7M=
