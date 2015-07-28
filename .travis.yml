@@ -1,26 +1,25 @@
 language: c
 addons:
-    apt:
-        sources:
-            - ubuntu-toolchain-r-test
-        packages:
-            - python-pip
-            - curl
-            - valgrind
-            - autotools-dev
-            - libexpat-dev
-            - libmhash-dev
-            - libpcre3-dev
-            - libperl-dev
-            - libssl-dev
-            - libxslt1-dev
-            - zlib1g-dev
-            - gcc-4.8
+  apt:
+    sources:
+    - ubuntu-toolchain-r-test
+    packages:
+    - python-pip
+    - curl
+    - valgrind
+    - autotools-dev
+    - libexpat-dev
+    - libmhash-dev
+    - libpcre3-dev
+    - libperl-dev
+    - libssl-dev
+    - libxslt1-dev
+    - zlib1g-dev
+    - gcc-4.8
 install:
-    - pip install --user stormpath
+- pip install --user stormpath
 script:
-    - CC=gcc-4.8 make -C test
+- CC=gcc-4.8 make -C test
 env:
-  global:
-    - secure: Jk9gNRxQH3l0o99aEECDYuV10pTJnBprXWOVAQXSBB+6O1zxV5uy1V57G+byzHlSI4m61A1eoVYZInMpjplVWXs8AiQ0MEFWZkI1+Ca5q4RCxpo4/GLNBp0dc0armVrggoJ7nhCVLHn1eRhFOceuN9F4Z6hvi/h9b1uszX9q6ywVHcaDI4rMA5kZSwvpYXX9x6C9fQe4kUlAh8bP3xkmKqWh+Ht31Nt31Qs2M+vO0H7d3pZtdwWc0DExxES1MWdoMzwrai2cDf3vmzUO8xKeWJQlwIAfNrwD38UjaraDpXCog9Zhj0ggexV7N/kJM+XOb6sr8Tpy5JLOxfqR9g6h8UVGLUeEVJsgtRUf0qHp3p3n03XjkOcrURNASF643VjUSVkF8X3ocFvzyd3t4hd9zsgc8WQlMh/itaBanPBz03+fo71esGiUfvw4KsKREks0VOK3Q/RcraII5sOhz77lNrE1mr0vBDOBSWN8bD7xz4jrwKXyI88x7oqCCOcV+1PGTDEphW8f7+iQqliXifaE/f2XVS6bGNIFVhV9kM8JnsMTN6tQ2QmcbmRUOY9PHw5ncjfOXijmc0SDsy3DuCDHDmea1TsIDbRpzbfc5QVUfddh6le3T3Nss9Agr7ziPro3orTLCzezw/ecR/HMRaCU8HjKyE78pk9fmGvMNvnFj7M=
-    - secure: fYAOC30BZV/RWteNLrr5x8SzpfANoCKGYrKWT5y+nN0I0FaR17SPinOd4GE0QnMvPfTuknvZnOEgIoWOjp5Uhk0EF630uWgHBkG0f/p7Ef5ZrDNyiVYbuPq2ATH+TaqZ17s1j7WGfWYSBzvjHGrjMjEt9Mhk1hC+RpUL3lS9jzpXZ5UV0kyVsQDFYUlxy2aeYfPt1XIkvTlt6SguuY+0ZBXKm8yp0jWiuyTM1koYjMnq8ZR/WAkVVZNTg9S3msWrEe81IY2LlYlIq7YeYAIjd8xCwVYuYUuVaw76nfw1OtUMC8KeXzcOTGsBARIeXVVuiBW2yuGVmqY75g76PzVWTTdLOBksZwgKz5Hw+5+/E+5GaGHeUGeWAuBlRBTGy5nAKPzlnM7lb+I5zEHrMHnNuqTXTRsRPe0iOnYeBX3dCkfpva1A6VxfbZujjCrbIb1CN+DWWn4Q3Kc3yPzDWcLmXxfvZ7ESjGVA9zPGqQcZZTNLwUJoR4u4e2lRtsI2qvtPRo54QAKmbPTslpipSxO97EsC6qGIjf1Sxd6dtFQJARFWWth53yKqFkRePi+fq16CuxrSyBRxmlPHLUqPKWTHQ7PrEw6wcGbVCziMuUl1ZnkGZfe1Cs/I2jOhDMRKKkhLXfZlRJ6mHLjfwwHY19G97vlo38ywFzwEeKfvFd03a9g=
+  - secure: G9E9qpTa8Ns3OcPbyCq4nWoooHIhT8/zaVbOTCdokfElhxaFmKGhaLNuuZDbrzzELISwYFgER3XeFZlbZnQH2rWlXawwGt5SlXKeljuD+nvzU3ncch3Jw34iLmYMBCoy93ehdsjFRTjC2cUSvESku4TqNnc3is2MQUc8dzVv1viFBjRYFewnSs3hLZIwqwqLF5dW6N43gNkF0zv4brOPGhYtThAmJKEyXVYtpV3Mo7uiVgp2oYQKmNPVJRNBJhjJ2pzD9TcfYRxqEPYQEHLyBGSYXqvU3bcSNKJLStwp5cuUt54U6H9JAvQ+pfjd7byxAd6PrAuKEfA05eLodHJ0edqUpcOFnUeMyphtOcUvgoxk1KndKlNQ9V0kYXMSnFs6b050M8UsaCBd7KdLSextFMLvVYP/HSKeGj3vM93ou1quF9dUWhPbEPvkMzcymC0R3M9/k3A87n8wdPtAXWj0uFxIrkh0/Ll4TRH8dxAj/VnpZx4Dywrk4SPH5ej5h9VwhQ/WXwAXyrVh4ADno6KbsFUY68UdDilhjHyr4ncURrs8cb2zJstcXXV4hA27Ok/ncr/SjYfOWvSwpMBzF1l5QeHq+5EIAm6qE3JbOZ8SnVNjYIU1g6vgXki5G0klKPKEB+btGtm4QdhqwPPkqY5m15GS+A6sOpKMlbaOf9HvrN0=
+  - secure: Cij6XViBK4bPmtCuzFTg8QscsuypI2C5ZDjBDEgD802EzUbB4GRds3VBoZYvyyCHFDk1fQEy9QbkCgrBBnrtNpcGb1CtUZmBL6LVyH3IFhi4+cZ87QICeCmqEtk/N5b0lTBFQxFtnsSsPEn7LkYcLmwapv+LKWtZ4J+xkpihsGZTe389i7AMI90USxyc+1ZoQ0nsdNxYxPeg21JYvozQNRw5Z1zhVKQ0dZxkx9S6DEWp6oh5amhqHESskb0UlwQosa5IRrbUcZ1ZMPdxOgGQv9yHXLmaH7iXusCMmW0MlXKuhpdaQ/dIERFZm3DFycofIbmn0hJ4SvMdcP0FtN4FiCdFR38X9BexHOH5cpjfm2FWx0gBdYKVoiw4h9qXM4c0Hvv5pwoS+XXjs2GAjpzi3c/1Hx0L67NQL7zlaxAinJtX0t7PXN1siOdtMxSUBB1lNut63ukWEGOHXkNEH5M+M+BIsX963r4ZAJBzuX/PAQ3XZGOdhAQwfOtaUDec36fwDfNKNAWYVmuEXUpIrNhGwHvfSof2vYe8dySVARrbtChk8oZMsiV5sdW5N8eCpgoRQFGCI8YQcRvKuTPVySQMJHDV6Ke9OwLxjsJuMLRNpAmoUkqAcJXx44hLgBmu5SMgBnTtgFbifuOJ6MqjDMK9FOBTDXhFjmrqKTu7V0B7Jiw=
