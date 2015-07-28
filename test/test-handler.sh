@@ -9,7 +9,7 @@ test -x nginx || exit 1
 # Make sure there's no stale nginx test process running from previous attempt
 fuser -n tcp 8000 -ks || true
 
-valgrind -q --error-exitcode=1 ./nginx -c $PWD/conf/nginx.conf &
+valgrind -q --error-exitcode=1 --suppressions=valgrind.supp ./nginx -c $PWD/conf/nginx.conf &
 trap 'kill %1' EXIT
 sleep 5
 
